@@ -1,0 +1,20 @@
+BBox Labeler Third-Party Notices
+
+This internal distribution may include third-party runtime components for
+automatic bounding-box proposals. Their licenses remain governed by the
+respective upstream projects.
+
+Bundled detector runtime packages:
+
+- Python: Python Software Foundation License
+- PyTorch: BSD-style license
+- torchvision: BSD-style license
+- Ultralytics: AGPL-3.0 license unless a separate commercial license applies
+- OpenCV / opencv-python-headless: Apache-2.0 license
+- NumPy: BSD license
+- FastSAM model/code assets: use only under the upstream license terms accepted
+  by the company before internal deployment
+
+Internal release owners should keep the generated Python package metadata in
+`runtime/python/Lib/site-packages/*.dist-info` with the shipped installer and
+review upstream license terms before distributing outside the company.

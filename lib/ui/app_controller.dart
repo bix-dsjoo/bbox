@@ -1,0 +1,1265 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+
+import '../annotation/annotation_rules.dart';
+import '../annotation/default_labels.dart';
+import '../annotation/label_shortcut_migration.dart';
+import '../annotation/models.dart';
+import '../detector/auto_box_service.dart';
+import '../detector/bread_worker_client.dart';
+import '../detector/detector.dart';
+import '../detector/worker_protocol.dart';
+import '../export/coco_exporter.dart';
+import '../image_import/image_scanner.dart';
+import '../project/project_library.dart';
+import '../project/project_store.dart';
+import 'workbench_copy.dart';
+
+enum SaveStatus { saved, saving, failed }
+
+enum ProjectActivity { idle, importing, validating, exporting }
+
+class ImageViewLoadState {
+  const ImageViewLoadState({this.imageId, this.isLoading = false});
+
+  final int? imageId;
+  final bool isLoading;
+}
+
+enum SelectedImageViewState { unknown, ready, missing }
+
+class ImageImportProgress {
+  const ImageImportProgress({
+    required this.total,
+    required this.processed,
+    required this.added,
+    required this.skipped,
+    this.errors = 0,
+  });
+
+  final int total;
+  final int processed;
+  final int added;
+  final int skipped;
+  final int errors;
+
+  bool get isComplete => total > 0 ? processed >= total : true;
+}
+
+class AppController extends ChangeNotifier {
+  AppController({
+    ProjectLibrary? projectLibrary,
+    AutoBoxRuntime? autoBoxRuntime,
+  }) : _projectLibrary = projectLibrary ?? ProjectLibrary.appData(),
+       _autoBoxRuntime = autoBoxRuntime ?? defaultAutoBoxService() {
+    _autoBoxRuntime.addListener(_handleAutoBoxRuntimeChanged);
+  }
+
+  final ProjectLibrary _projectLibrary;
+  final AutoBoxRuntime _autoBoxRuntime;
+
+  AnnotationProject? _project;
+  int? _selectedImageId;
+  String? _selectedBoxId;
+  Object? lastError;
+  Future<void> _autoSaveChain = Future<void>.value();
+  List<ProjectLibraryEntry> _projectLibraryEntries = const [];
+  bool _isProjectLibraryLoading = false;
+  String? _currentLibraryProjectId;
+  SaveStatus _saveStatus = SaveStatus.saved;
+  Object? _lastSaveError;
+  ProjectActivity _projectActivity = ProjectActivity.idle;
+  ImageImportProgress? _imageImportProgress;
+  ImageViewLoadState _imageViewLoadState = const ImageViewLoadState();
+  String? lastUserMessage;
+  int _projectEpoch = 0;
+  int _nextAutoBoxRequestToken = 0;
+  int? _activeAutoBoxRequestToken;
+
+  final List<AnnotationProject> _undoStack = [];
+  final List<AnnotationProject> _redoStack = [];
+
+  AnnotationProject? get project => _project;
+
+  List<ProjectLibraryEntry> get projectLibraryEntries => _projectLibraryEntries;
+
+  bool get isProjectLibraryLoading => _isProjectLibraryLoading;
+
+  SaveStatus get saveStatus => _saveStatus;
+
+  Object? get lastSaveError => _lastSaveError;
+
+  void clearLastUserMessage() {
+    if (lastUserMessage == null) {
+      return;
+    }
+    lastUserMessage = null;
+    notifyListeners();
+  }
+
+  int? get selectedImageId => _selectedImageId;
+
+  String? get selectedBoxId => _selectedBoxId;
+
+  bool get hasProject => _project != null;
+
+  ProjectActivity get projectActivity => _projectActivity;
+
+  ProjectActivity get activity => _projectActivity;
+
+  ImageImportProgress? get imageImportProgress => _imageImportProgress;
+
+  ImageImportProgress? get lastImportProgress => _imageImportProgress;
+
+  ImageViewLoadState get imageViewLoadState => _imageViewLoadState;
+
+  bool get isAutoBoxRunning => _activeAutoBoxRequestToken != null;
+
+  bool get isAutomationRunning => isAutoBoxRunning;
+
+  AutoBoxState get autoBoxState => _autoBoxRuntime.state;
+
+  bool get canRunAutoBoxes {
+    final image = selectedImage;
+    final serviceReady =
+        autoBoxState == AutoBoxState.ready ||
+        autoBoxState == AutoBoxState.failed;
+    return image != null &&
+        image.status != ImageStatus.error &&
+        image.width > 0 &&
+        image.height > 0 &&
+        !isAutomationRunning &&
+        serviceReady;
+  }
+
+  Future<void> warmUpAutoBoxes() => _autoBoxRuntime.warmUp();
+
+  Future<void> shutdownAutoBoxes() => _autoBoxRuntime.shutdown();
+
+  SelectedImageViewState get selectedImageViewState {
+    final image = selectedImage;
+    if (image == null) {
+      return SelectedImageViewState.unknown;
+    }
+    return File(image.sourcePath).existsSync()
+        ? SelectedImageViewState.ready
+        : SelectedImageViewState.missing;
+  }
+
+  AnnotatedImage? get selectedImage {
+    final project = _project;
+    final selectedImageId = _selectedImageId;
+    if (project == null || selectedImageId == null) {
+      return null;
+    }
+    for (final image in project.images) {
+      if (image.id == selectedImageId) {
+        return image;
+      }
+    }
+    return null;
+  }
+
+  BoundingBox? get selectedBox {
+    final image = selectedImage;
+    final selectedBoxId = _selectedBoxId;
+    if (image == null || selectedBoxId == null) {
+      return null;
+    }
+    for (final box in image.visibleBoxes) {
+      if (box.id == selectedBoxId) {
+        return box;
+      }
+    }
+    return null;
+  }
+
+  bool get canConfirmSelectedImage {
+    final image = selectedImage;
+    return image != null && AnnotationRules.canConfirm(image);
+  }
+
+  String? get selectedImageCompletionBlockerReason {
+    final image = selectedImage;
+    if (image == null) {
+      return null;
+    }
+    if (image.status == ImageStatus.error ||
+        image.width <= 0 ||
+        image.height <= 0) {
+      return WorkbenchCopy.completionBlockedInvalidImage;
+    }
+    var invalidCount = 0;
+    var unlabeledCount = 0;
+    for (final box in image.visibleBoxes) {
+      if (!AnnotationRules.isBoxValid(
+        box,
+        imageWidth: image.width,
+        imageHeight: image.height,
+      )) {
+        invalidCount++;
+      }
+      if (box.status != BoxStatus.labeled || box.labelId == null) {
+        unlabeledCount++;
+      }
+    }
+    if (invalidCount > 0) {
+      return WorkbenchCopy.invalidBoxCount(invalidCount);
+    }
+    if (unlabeledCount > 0) {
+      return WorkbenchCopy.unlabeledBoxCount(unlabeledCount);
+    }
+    return null;
+  }
+
+  bool get canUndo => _undoStack.isNotEmpty;
+
+  bool get canRedo => _redoStack.isNotEmpty;
+
+  void createProject(String name, {String? projectFilePath}) {
+    _undoStack.clear();
+    _redoStack.clear();
+    _projectEpoch++;
+    _project = AnnotationProject.empty(name: name).copyWith(
+      projectFilePath: projectFilePath,
+      status: ProjectStatus.ready,
+      labels: createDefaultLabels(),
+    );
+    _currentLibraryProjectId = _libraryProjectIdForPath(projectFilePath);
+    _selectedImageId = null;
+    _selectedBoxId = null;
+    _projectActivity = ProjectActivity.idle;
+    _imageImportProgress = null;
+    _imageViewLoadState = const ImageViewLoadState();
+    _activeAutoBoxRequestToken = null;
+    _saveStatus = SaveStatus.saved;
+    _lastSaveError = null;
+    notifyListeners();
+  }
+
+  void loadProject(AnnotationProject project) {
+    _undoStack.clear();
+    _redoStack.clear();
+    _projectEpoch++;
+    final migratedProject = migrateMissingLabelShortcuts(project);
+    final migrated = !identical(migratedProject, project);
+    _project = migratedProject;
+    _currentLibraryProjectId = _libraryProjectIdForPath(
+      _project!.projectFilePath,
+    );
+    _selectedImageId = _project!.images.isEmpty
+        ? null
+        : _project!.images.first.id;
+    _selectedBoxId = null;
+    _projectActivity = ProjectActivity.idle;
+    _imageImportProgress = null;
+    _imageViewLoadState = ImageViewLoadState(
+      imageId: _selectedImageId,
+      isLoading: false,
+    );
+    _activeAutoBoxRequestToken = null;
+    _saveStatus = SaveStatus.saved;
+    _lastSaveError = null;
+    if (migrated && _project!.projectFilePath != null) {
+      _scheduleAutoSave();
+    }
+    notifyListeners();
+  }
+
+  Future<void> openProject(String projectFilePath) async {
+    loadProject(await ProjectStore.load(projectFilePath));
+  }
+
+  Future<void> loadProjectLibrary() async {
+    _isProjectLibraryLoading = true;
+    notifyListeners();
+    try {
+      _projectLibraryEntries = await _projectLibrary.listProjects();
+    } finally {
+      _isProjectLibraryLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> createLibraryProject(String name) async {
+    _undoStack.clear();
+    _redoStack.clear();
+    final created = await _projectLibrary.createProject(name);
+    _projectEpoch++;
+    _project = created;
+    _currentLibraryProjectId = _libraryProjectIdForPath(
+      _project!.projectFilePath,
+    );
+    _selectedImageId = null;
+    _selectedBoxId = null;
+    _projectActivity = ProjectActivity.idle;
+    _imageImportProgress = null;
+    _imageViewLoadState = const ImageViewLoadState();
+    _activeAutoBoxRequestToken = null;
+    _projectLibraryEntries = await _projectLibrary.listProjects();
+    _saveStatus = SaveStatus.saved;
+    _lastSaveError = null;
+    notifyListeners();
+  }
+
+  Future<void> openLibraryProject(String id) async {
+    loadProject(await _projectLibrary.openProject(id));
+    _currentLibraryProjectId = id;
+    _projectLibraryEntries = await _projectLibrary.listProjects();
+    _saveStatus = SaveStatus.saved;
+    _lastSaveError = null;
+    notifyListeners();
+  }
+
+  Future<void> renameLibraryProject(String id, String name) async {
+    final renamed = await _projectLibrary.renameProject(id, name);
+    if (_currentLibraryProjectId == id ||
+        _project?.projectFilePath == renamed.projectFilePath) {
+      _projectEpoch++;
+      _project = renamed;
+      _currentLibraryProjectId = id;
+    }
+    _projectLibraryEntries = await _projectLibrary.listProjects();
+    _saveStatus = SaveStatus.saved;
+    _lastSaveError = null;
+    notifyListeners();
+  }
+
+  Future<void> deleteLibraryProject(String id) async {
+    await _projectLibrary.deleteProject(id);
+    _projectLibraryEntries = await _projectLibrary.listProjects();
+    if (_currentLibraryProjectId == id) {
+      _projectEpoch++;
+      _project = null;
+      _currentLibraryProjectId = null;
+      _selectedImageId = null;
+      _selectedBoxId = null;
+      _undoStack.clear();
+      _redoStack.clear();
+      _projectActivity = ProjectActivity.idle;
+      _imageImportProgress = null;
+      _imageViewLoadState = const ImageViewLoadState();
+      _activeAutoBoxRequestToken = null;
+      _saveStatus = SaveStatus.saved;
+      _lastSaveError = null;
+    }
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  void debugSetImageViewLoadState(ImageViewLoadState state) {
+    _imageViewLoadState = state;
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  void debugSetImportProgressForTest(ImageImportProgress? progress) {
+    _imageImportProgress = progress;
+    _projectActivity = ProjectActivity.importing;
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  void debugSetProjectActivityForTest(ProjectActivity activity) {
+    _projectActivity = activity;
+    notifyListeners();
+  }
+
+  @visibleForTesting
+  void debugSetProjectForTest(AnnotationProject project) {
+    _projectEpoch++;
+    _project = project;
+    _repairSelection();
+    notifyListeners();
+  }
+
+  Future<void> saveProject([String? projectFilePath]) async {
+    _saveStatus = SaveStatus.saving;
+    _lastSaveError = null;
+    notifyListeners();
+    try {
+      final targetPath = projectFilePath ?? _requireProject().projectFilePath;
+      if (targetPath == null) {
+        throw StateError('Project path is required.');
+      }
+      await _autoSaveChain;
+      _project = await ProjectStore.save(_requireProject(), targetPath);
+      _currentLibraryProjectId = _libraryProjectIdForPath(
+        _project!.projectFilePath,
+      );
+      await _refreshLibraryEntryIfNeeded();
+      _saveStatus = SaveStatus.saved;
+      _lastSaveError = null;
+      notifyListeners();
+    } catch (error) {
+      lastError = error;
+      _lastSaveError = error;
+      _saveStatus = SaveStatus.failed;
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  Future<void> addImagesFromFolder(
+    String folderPath, {
+    Detector? detector,
+  }) async {
+    _projectActivity = ProjectActivity.importing;
+    _imageImportProgress = null;
+    notifyListeners();
+    try {
+      final scanned = await ImageScanner.scanFolder(folderPath);
+      await _addScannedImages(scanned, importedFrom: folderPath);
+    } catch (_) {
+      _projectActivity = ProjectActivity.idle;
+      _imageImportProgress = null;
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  Future<void> addImageFiles(
+    List<String> filePaths, {
+    Detector? detector,
+  }) async {
+    _projectActivity = ProjectActivity.importing;
+    _imageImportProgress = null;
+    notifyListeners();
+    try {
+      final scanned = await ImageScanner.scanFiles(filePaths);
+      await _addScannedImages(scanned);
+    } catch (_) {
+      _projectActivity = ProjectActivity.idle;
+      _imageImportProgress = null;
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  @Deprecated('Use addImagesFromFolder instead.')
+  Future<void> importImagesFromFolder(String folderPath, {Detector? detector}) {
+    return addImagesFromFolder(folderPath, detector: detector);
+  }
+
+  Future<List<String>> validateSourceFiles() async {
+    final project = _project;
+    if (project == null) {
+      return const [];
+    }
+    _projectActivity = ProjectActivity.validating;
+    notifyListeners();
+    final missing = <String>[];
+    final nextImages = <AnnotatedImage>[];
+    var changed = false;
+    for (final image in project.images) {
+      if (File(image.sourcePath).existsSync()) {
+        nextImages.add(image);
+        continue;
+      }
+      missing.add(image.sourcePath);
+      final updated =
+          image.status == ImageStatus.error &&
+              image.errorMessage == 'Source image file not found'
+          ? image
+          : image.copyWith(
+              status: ImageStatus.error,
+              errorMessage: 'Source image file not found',
+            );
+      if (updated != image) {
+        changed = true;
+      }
+      nextImages.add(updated);
+    }
+    if (changed) {
+      _recordUndo();
+      _project = project.copyWith(
+        images: nextImages,
+        status: ProjectStatus.error,
+      );
+      _scheduleAutoSave();
+    }
+    _projectActivity = ProjectActivity.idle;
+    notifyListeners();
+    return missing;
+  }
+
+  void removeImageFromProject(int imageId) {
+    final project = _project;
+    if (project == null) {
+      return;
+    }
+    final exists = project.images.any((image) => image.id == imageId);
+    if (!exists) {
+      return;
+    }
+    _recordUndo();
+    final nextImages = <AnnotatedImage>[
+      for (final image in project.images)
+        if (image.id != imageId) image,
+    ];
+    _project = project.copyWith(
+      images: nextImages,
+      status: ProjectStatus.ready,
+    );
+    _repairSelectionAfterRemoval();
+    _imageViewLoadState = ImageViewLoadState(
+      imageId: _selectedImageId,
+      isLoading: false,
+    );
+    _scheduleAutoSave();
+    notifyListeners();
+  }
+
+  void selectImage(int imageId) {
+    _selectedImageId = imageId;
+    _selectedBoxId = null;
+    _imageViewLoadState = ImageViewLoadState(
+      imageId: imageId,
+      isLoading: false,
+    );
+    notifyListeners();
+  }
+
+  void selectBox(String? boxId) {
+    _selectedBoxId = boxId;
+    notifyListeners();
+  }
+
+  void addBox({
+    required double x,
+    required double y,
+    required double width,
+    required double height,
+  }) {
+    final image = selectedImage;
+    if (image == null) {
+      return;
+    }
+    _recordUndo();
+    final box = AnnotationRules.clampBox(
+      BoundingBox(
+        id: 'manual-${DateTime.now().microsecondsSinceEpoch}',
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        status: BoxStatus.proposal,
+      ),
+      imageWidth: image.width,
+      imageHeight: image.height,
+      minSize: 2,
+    );
+    _replaceSelectedImage(
+      image.copyWith(
+        status: ImageStatus.needsReview,
+        boxes: [...image.boxes, box],
+      ),
+    );
+    _selectedBoxId = box.id;
+    _scheduleAutoSave();
+    notifyListeners();
+  }
+
+  void moveSelectedBox(double dx, double dy) {
+    _editSelectedBox((image, box) {
+      return AnnotationRules.clampBox(
+        box.copyWith(x: box.x + dx, y: box.y + dy),
+        imageWidth: image.width,
+        imageHeight: image.height,
+      );
+    });
+  }
+
+  void resizeSelectedBox(double width, double height) {
+    _editSelectedBox((image, box) {
+      final maxWidth = image.width - box.x;
+      final maxHeight = image.height - box.y;
+      return AnnotationRules.clampBox(
+        box.copyWith(
+          width: width.clamp(2, maxWidth).toDouble(),
+          height: height.clamp(2, maxHeight).toDouble(),
+        ),
+        imageWidth: image.width,
+        imageHeight: image.height,
+      );
+    });
+  }
+
+  void setSelectedBoxGeometry({
+    required double x,
+    required double y,
+    required double width,
+    required double height,
+  }) {
+    _editSelectedBox((image, box) {
+      return AnnotationRules.clampBox(
+        box.copyWith(x: x, y: y, width: width, height: height),
+        imageWidth: image.width,
+        imageHeight: image.height,
+      );
+    });
+  }
+
+  void deleteSelectedBox() {
+    final image = selectedImage;
+    final boxId = _selectedBoxId;
+    if (image == null || boxId == null) {
+      return;
+    }
+    _recordUndo();
+    _replaceSelectedImage(AnnotationRules.deleteBox(image, boxId: boxId));
+    _selectedBoxId = null;
+    _scheduleAutoSave();
+    notifyListeners();
+  }
+
+  int? nextImageNeedingWorkId({int? afterImageId}) {
+    final project = _project;
+    if (project == null || project.images.isEmpty) {
+      return null;
+    }
+    final startIndex = afterImageId == null
+        ? -1
+        : project.images.indexWhere((image) => image.id == afterImageId);
+    for (var index = startIndex + 1; index < project.images.length; index++) {
+      final image = project.images[index];
+      if (_imageNeedsWork(image)) {
+        return image.id;
+      }
+    }
+    final endIndex = startIndex < 0 ? project.images.length : startIndex;
+    for (var index = 0; index < endIndex; index++) {
+      final image = project.images[index];
+      if (_imageNeedsWork(image)) {
+        return image.id;
+      }
+    }
+    return null;
+  }
+
+  String? nextBoxNeedingLabelId(AnnotatedImage image, {String? afterBoxId}) {
+    final boxes = image.visibleBoxes.toList(growable: false);
+    if (boxes.isEmpty) {
+      return null;
+    }
+    final startIndex = afterBoxId == null
+        ? -1
+        : boxes.indexWhere((box) => box.id == afterBoxId);
+    for (var index = startIndex + 1; index < boxes.length; index++) {
+      final box = boxes[index];
+      if (_boxNeedsLabel(box)) {
+        return box.id;
+      }
+    }
+    final endIndex = startIndex < 0 ? boxes.length : startIndex;
+    for (var index = 0; index < endIndex; index++) {
+      final box = boxes[index];
+      if (_boxNeedsLabel(box)) {
+        return box.id;
+      }
+    }
+    return null;
+  }
+
+  Future<void> detectSelectedImage({
+    Detector? detector,
+    DetectionOptions options = const DetectionOptions(),
+  }) async {
+    final project = _project;
+    final image = selectedImage;
+    if (project == null ||
+        image == null ||
+        image.status == ImageStatus.error ||
+        isAutomationRunning) {
+      return;
+    }
+    final activeDetector = detector ?? _autoBoxRuntime;
+    final requestProjectEpoch = _projectEpoch;
+    final requestImageId = image.id;
+    final previousProject = project;
+    final previousImage = image;
+    final previousSelectedBoxId = _selectedBoxId;
+    final requestToken = ++_nextAutoBoxRequestToken;
+    _activeAutoBoxRequestToken = requestToken;
+    lastUserMessage = WorkbenchCopy.autoBoxesRunning;
+    notifyListeners();
+
+    try {
+      final result = await _detectWithProgress(
+        activeDetector,
+        image,
+        options: options,
+      );
+
+      if (!_isCurrentAutoBoxRequest(requestProjectEpoch, requestImageId)) {
+        _clearStaleAutoBoxActivity(requestToken);
+        return;
+      }
+
+      if (result.errorMessage != null) {
+        _project = previousProject;
+        _selectedBoxId = previousSelectedBoxId;
+        lastError = result.errorMessage;
+        lastUserMessage = WorkbenchCopy.autoBoxesFailed;
+        return;
+      }
+
+      _undoStack.add(previousProject);
+      _redoStack.clear();
+      _project = previousProject;
+      final proposalBoxes = _asUnlabeledProposals(result.boxes);
+      final updated = previousImage.copyWith(
+        status: ImageStatus.needsReview,
+        boxes: proposalBoxes,
+        errorMessage: null,
+      );
+      _replaceSelectedImage(updated);
+      _project = _project!.copyWith(detectorName: result.detectorName);
+      _selectedBoxId = updated.visibleBoxes.isEmpty
+          ? null
+          : updated.visibleBoxes.first.id;
+      lastUserMessage = proposalBoxes.isEmpty
+          ? WorkbenchCopy.autoBoxesEmpty
+          : WorkbenchCopy.autoBoxesCreated(proposalBoxes.length);
+      _scheduleAutoSave();
+    } catch (error) {
+      if (!_isCurrentAutoBoxRequest(requestProjectEpoch, requestImageId)) {
+        _clearStaleAutoBoxActivity(requestToken);
+        return;
+      }
+      _project = previousProject;
+      _selectedBoxId = previousSelectedBoxId;
+      lastError = error;
+      lastUserMessage = _autoBoxErrorMessage(error);
+    } finally {
+      if (_activeAutoBoxRequestToken == requestToken) {
+        _activeAutoBoxRequestToken = null;
+        notifyListeners();
+      }
+    }
+  }
+
+  void clearSelectedImageBoxes() {
+    final image = selectedImage;
+    if (image == null) {
+      return;
+    }
+    _recordUndo();
+    _replaceSelectedImage(
+      image.copyWith(
+        status: ImageStatus.needsReview,
+        boxes: const [],
+        errorMessage: null,
+      ),
+    );
+    _selectedBoxId = null;
+    _scheduleAutoSave();
+    notifyListeners();
+  }
+
+  LabelClass addLabel(String name, int color, {String? shortcut}) {
+    final project = _requireProject();
+    _recordUndo();
+    final updated = AnnotationRules.addLabel(
+      project,
+      name: name,
+      color: color,
+      shortcut: shortcut,
+    );
+    _project = updated;
+    _scheduleAutoSave();
+    notifyListeners();
+    return updated.labels.last;
+  }
+
+  void updateLabel({
+    required int labelId,
+    required String name,
+    required int color,
+    String? shortcut,
+  }) {
+    final project = _requireProject();
+    _recordUndo();
+    _project = AnnotationRules.updateLabel(
+      project,
+      labelId: labelId,
+      name: name,
+      color: color,
+      shortcut: shortcut,
+    );
+    _scheduleAutoSave();
+    notifyListeners();
+  }
+
+  void assignSelectedBoxLabel(int labelId) {
+    final image = selectedImage;
+    final boxId = _selectedBoxId;
+    if (image == null || boxId == null) {
+      return;
+    }
+    _recordUndo();
+    final updatedImage = AnnotationRules.assignLabel(
+      image,
+      boxId: boxId,
+      labelId: labelId,
+    );
+    _replaceSelectedImage(updatedImage);
+    _selectedBoxId =
+        nextBoxNeedingLabelId(updatedImage, afterBoxId: boxId) ?? boxId;
+    _scheduleAutoSave();
+    notifyListeners();
+  }
+
+  void confirmSelectedImage() {
+    final image = selectedImage;
+    if (image == null) {
+      return;
+    }
+    _recordUndo();
+    _replaceSelectedImage(AnnotationRules.confirmImage(image));
+    _scheduleAutoSave();
+    notifyListeners();
+  }
+
+  void completeSelectedImageAndSelectNext() {
+    final image = selectedImage;
+    if (image == null) {
+      return;
+    }
+    _recordUndo();
+    final confirmedImage = AnnotationRules.confirmImage(image);
+    _replaceSelectedImage(confirmedImage);
+    final nextImageId = nextImageNeedingWorkId(afterImageId: image.id);
+    if (nextImageId != null) {
+      _selectedImageId = nextImageId;
+      _selectedBoxId = null;
+      _imageViewLoadState = ImageViewLoadState(
+        imageId: nextImageId,
+        isLoading: false,
+      );
+    } else {
+      _selectedImageId = image.id;
+      _selectedBoxId = null;
+      lastUserMessage = WorkbenchCopy.allWorkImagesCompleted;
+    }
+    _scheduleAutoSave();
+    notifyListeners();
+  }
+
+  CocoExportSummary exportSummary({
+    CocoExportOptions options = const CocoExportOptions(),
+  }) {
+    return CocoExporter.validate(_requireProject(), options: options);
+  }
+
+  Map<String, Object?> buildCoco({
+    CocoExportOptions options = const CocoExportOptions(),
+  }) {
+    return CocoExporter.build(_requireProject(), options: options);
+  }
+
+  Future<void> exportCocoFile(String filePath) async {
+    final json = const JsonEncoder.withIndent('  ').convert(buildCoco());
+    await File(filePath).writeAsString(json, encoding: utf8, flush: true);
+  }
+
+  Future<void> returnToProjectHome() async {
+    await saveProject();
+    _clearActiveProject();
+    await loadProjectLibrary();
+  }
+
+  void undo() {
+    if (_undoStack.isEmpty || _project == null) {
+      return;
+    }
+    _redoStack.add(_project!);
+    _project = _undoStack.removeLast();
+    _repairSelection();
+    notifyListeners();
+  }
+
+  void redo() {
+    if (_redoStack.isEmpty || _project == null) {
+      return;
+    }
+    _undoStack.add(_project!);
+    _project = _redoStack.removeLast();
+    _repairSelection();
+    notifyListeners();
+  }
+
+  void _clearActiveProject() {
+    _projectEpoch++;
+    _project = null;
+    _currentLibraryProjectId = null;
+    _selectedImageId = null;
+    _selectedBoxId = null;
+    _projectActivity = ProjectActivity.idle;
+    _imageImportProgress = null;
+    _imageViewLoadState = const ImageViewLoadState();
+    _activeAutoBoxRequestToken = null;
+    _undoStack.clear();
+    _redoStack.clear();
+    _saveStatus = SaveStatus.saved;
+    _lastSaveError = null;
+    notifyListeners();
+  }
+
+  AnnotationProject _requireProject() {
+    final project = _project;
+    if (project == null) {
+      throw StateError('No project is open.');
+    }
+    return project;
+  }
+
+  void _recordUndo() {
+    final project = _project;
+    if (project == null) {
+      return;
+    }
+    _undoStack.add(project);
+    _redoStack.clear();
+  }
+
+  Future<void> _addScannedImages(
+    List<ScannedImage> scannedImages, {
+    String? importedFrom,
+  }) async {
+    final project = _requireProject();
+    if (scannedImages.isEmpty) {
+      _projectActivity = ProjectActivity.idle;
+      _imageImportProgress = null;
+      notifyListeners();
+      return;
+    }
+    final existing = <String, bool>{}
+      ..addEntries(
+        project.images.map((image) => MapEntry(_sourcePathKey(image), true)),
+      );
+    _recordUndo();
+    _project = project.copyWith(status: ProjectStatus.scanning);
+    _projectActivity = ProjectActivity.importing;
+    _imageImportProgress = ImageImportProgress(
+      total: scannedImages.length,
+      processed: 0,
+      added: 0,
+      skipped: 0,
+      errors: 0,
+    );
+    notifyListeners();
+    var processed = 0;
+    var added = 0;
+    var skipped = 0;
+    var errors = 0;
+    var nextId = project.nextImageId;
+    final nextImages = <AnnotatedImage>[...project.images];
+    try {
+      for (final scanned in scannedImages) {
+        processed += 1;
+        final sourcePath = File(scanned.sourcePath).absolute.path;
+        final sourceKey = _sourcePathKeyFromSource(sourcePath);
+        if (existing.containsKey(sourceKey)) {
+          skipped += 1;
+          _imageImportProgress = ImageImportProgress(
+            total: scannedImages.length,
+            processed: processed,
+            added: added,
+            skipped: skipped,
+            errors: errors,
+          );
+          notifyListeners();
+          continue;
+        }
+        existing[sourceKey] = true;
+        final importedImage = AnnotatedImage(
+          id: nextId++,
+          sourcePath: sourcePath,
+          displayName: scanned.displayName,
+          importedFrom:
+              scanned.importedFrom ?? importedFrom ?? p.dirname(sourcePath),
+          width: scanned.width,
+          height: scanned.height,
+          status: scanned.hasError
+              ? ImageStatus.error
+              : ImageStatus.needsReview,
+          errorMessage: scanned.errorMessage,
+        );
+        nextImages.add(importedImage);
+        added += 1;
+        if (scanned.hasError) {
+          errors += 1;
+        }
+        _imageImportProgress = ImageImportProgress(
+          total: scannedImages.length,
+          processed: processed,
+          added: added,
+          skipped: skipped,
+          errors: errors,
+        );
+        notifyListeners();
+      }
+      _project = _project!.copyWith(
+        status: ProjectStatus.ready,
+        images: nextImages,
+      );
+      _repairSelectionAfterImport(nextImages);
+      _scheduleAutoSave();
+    } finally {
+      _projectActivity = ProjectActivity.idle;
+      _imageImportProgress = ImageImportProgress(
+        total: scannedImages.length,
+        processed: processed,
+        added: added,
+        skipped: skipped,
+        errors: errors,
+      );
+      lastUserMessage = WorkbenchCopy.importComplete(added, skipped, errors);
+      notifyListeners();
+    }
+  }
+
+  void _repairSelection() {
+    final project = _project;
+    if (project == null || project.images.isEmpty) {
+      _selectedImageId = null;
+      _selectedBoxId = null;
+      _imageViewLoadState = const ImageViewLoadState();
+      return;
+    }
+    final imageExists = project.images.any(
+      (image) => image.id == _selectedImageId,
+    );
+    if (!imageExists) {
+      _selectedImageId = project.images.first.id;
+      _selectedBoxId = null;
+      _imageViewLoadState = ImageViewLoadState(
+        imageId: _selectedImageId,
+        isLoading: false,
+      );
+    }
+    final image = selectedImage;
+    final boxExists =
+        image?.visibleBoxes.any((box) => box.id == _selectedBoxId) ?? false;
+    if (!boxExists) {
+      _selectedBoxId = null;
+    }
+  }
+
+  void _repairSelectionAfterImport(List<AnnotatedImage> importedImages) {
+    if (_selectedImageId == null && importedImages.isNotEmpty) {
+      _selectedImageId = importedImages.first.id;
+      _selectedBoxId = null;
+      _imageViewLoadState = ImageViewLoadState(
+        imageId: _selectedImageId,
+        isLoading: false,
+      );
+      return;
+    }
+    _repairSelection();
+  }
+
+  void _repairSelectionAfterRemoval() {
+    final project = _project;
+    if (project == null || project.images.isEmpty) {
+      _selectedImageId = null;
+      _selectedBoxId = null;
+      _imageViewLoadState = const ImageViewLoadState();
+      return;
+    }
+    final imageExists = project.images.any(
+      (image) => image.id == _selectedImageId,
+    );
+    if (!imageExists) {
+      _selectedImageId = project.images.first.id;
+      _selectedBoxId = null;
+      _imageViewLoadState = ImageViewLoadState(
+        imageId: _selectedImageId,
+        isLoading: false,
+      );
+      return;
+    }
+  }
+
+  void _replaceSelectedImage(AnnotatedImage updatedImage) {
+    final project = _requireProject();
+    _project = project.copyWith(
+      images: [
+        for (final image in project.images)
+          if (image.id == updatedImage.id) updatedImage else image,
+      ],
+    );
+  }
+
+  bool _imageNeedsWork(AnnotatedImage image) {
+    if (image.status == ImageStatus.error ||
+        image.status == ImageStatus.confirmed) {
+      return false;
+    }
+    return image.status == ImageStatus.needsReview ||
+        image.visibleBoxes.any(_boxNeedsLabel);
+  }
+
+  bool _boxNeedsLabel(BoundingBox box) {
+    return !box.isDeleted &&
+        (box.status != BoxStatus.labeled || box.labelId == null);
+  }
+
+  List<BoundingBox> _asUnlabeledProposals(List<BoundingBox> boxes) {
+    return [
+      for (final box in boxes)
+        box.copyWith(status: BoxStatus.proposal, labelId: null),
+    ];
+  }
+
+  Future<DetectionResult> _detectWithProgress(
+    Detector detector,
+    AnnotatedImage image, {
+    required DetectionOptions options,
+  }) {
+    return detector.detect(
+      image,
+      imagePath: image.sourcePath,
+      options: options,
+    );
+  }
+
+  bool _isCurrentAutoBoxRequest(int requestProjectEpoch, int requestImageId) {
+    return _project != null &&
+        _projectEpoch == requestProjectEpoch &&
+        _selectedImageId == requestImageId;
+  }
+
+  void _clearStaleAutoBoxActivity(int requestToken) {
+    final activeToken = _activeAutoBoxRequestToken;
+    if (activeToken != null && activeToken != requestToken) {
+      return;
+    }
+    if (lastUserMessage == WorkbenchCopy.autoBoxesRunning) {
+      lastUserMessage = null;
+      notifyListeners();
+    }
+  }
+
+  String _autoBoxErrorMessage(Object error) {
+    if (error is FileSystemException) {
+      return WorkbenchCopy.autoBoxesFileUnavailable;
+    }
+    if (error is WorkerRequestException) {
+      return error.code == 'decode_failed'
+          ? WorkbenchCopy.autoBoxesDecodeFailed
+          : WorkbenchCopy.autoBoxesWorkerFailed;
+    }
+    if (error is AutoBoxStartupException) {
+      return WorkbenchCopy.autoBoxesModelUnavailable;
+    }
+    if (error is WorkerProtocolException ||
+        error is WorkerTransportException ||
+        error is TimeoutException ||
+        error is StateError) {
+      return WorkbenchCopy.autoBoxesWorkerFailed;
+    }
+    return WorkbenchCopy.autoBoxesFailed;
+  }
+
+  void _handleAutoBoxRuntimeChanged() {
+    notifyListeners();
+  }
+
+  void _editSelectedBox(
+    BoundingBox Function(AnnotatedImage image, BoundingBox box) edit,
+  ) {
+    final image = selectedImage;
+    final box = selectedBox;
+    if (image == null || box == null) {
+      return;
+    }
+    _recordUndo();
+    final updatedBox = edit(image, box);
+    _replaceSelectedImage(
+      image.copyWith(
+        status: ImageStatus.needsReview,
+        boxes: [
+          for (final existing in image.boxes)
+            if (existing.id == updatedBox.id) updatedBox else existing,
+        ],
+      ),
+    );
+    _scheduleAutoSave();
+    notifyListeners();
+  }
+
+  void _scheduleAutoSave() {
+    final path = _project?.projectFilePath;
+    if (path == null) {
+      return;
+    }
+    _saveStatus = SaveStatus.saving;
+    _lastSaveError = null;
+    notifyListeners();
+    _autoSaveChain = _autoSaveChain
+        .then((_) async {
+          final project = _project;
+          if (project == null) {
+            return;
+          }
+          _project = await ProjectStore.save(project, path);
+          _currentLibraryProjectId = _libraryProjectIdForPath(
+            _project!.projectFilePath,
+          );
+          await _refreshLibraryEntryIfNeeded();
+          _saveStatus = SaveStatus.saved;
+          _lastSaveError = null;
+          notifyListeners();
+        })
+        .catchError((Object error) {
+          lastError = error;
+          _lastSaveError = error;
+          _saveStatus = SaveStatus.failed;
+          notifyListeners();
+        });
+    unawaited(_autoSaveChain);
+  }
+
+  Future<void> _refreshLibraryEntryIfNeeded() async {
+    final project = _project;
+    if (project == null || _currentLibraryProjectId == null) {
+      return;
+    }
+    await _projectLibrary.refreshEntry(project);
+    _projectLibraryEntries = await _projectLibrary.listProjects();
+  }
+
+  String _sourcePathKeyFromSource(String sourcePath) {
+    return p.normalize(sourcePath).toLowerCase();
+  }
+
+  String _sourcePathKey(AnnotatedImage image) =>
+      _sourcePathKeyFromSource(image.sourcePath);
+
+  String? _libraryProjectIdForPath(String? projectFilePath) {
+    if (projectFilePath == null || projectFilePath.trim().isEmpty) {
+      return null;
+    }
+    final normalizedRoot = p.normalize(
+      Directory(_projectLibrary.projectsRootPath).absolute.path,
+    );
+    final normalizedPath = p.normalize(File(projectFilePath).absolute.path);
+    if (!p.isWithin(normalizedRoot, normalizedPath)) {
+      return null;
+    }
+    return p.basename(p.dirname(projectFilePath));
+  }
+
+  @override
+  void dispose() {
+    _autoBoxRuntime.removeListener(_handleAutoBoxRuntimeChanged);
+    unawaited(_autoBoxRuntime.shutdown());
+    super.dispose();
+  }
+}

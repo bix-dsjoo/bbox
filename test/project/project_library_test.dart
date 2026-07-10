@@ -1,0 +1,183 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:bbox_labeler/annotation/models.dart';
+import 'package:bbox_labeler/project/project_library.dart';
+import 'package:bbox_labeler/project/project_store.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+
+void main() {
+  group('ProjectLibrary', () {
+    late Directory tempDir;
+    late DateTime now;
+    late ProjectLibrary library;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('bbox_project_library');
+      now = DateTime.utc(2026, 7, 7, 5, 30, 12);
+      library = ProjectLibrary(
+        rootPath: tempDir.path,
+        clock: () => now,
+        idGenerator: (name, timestamp) => 'fixed-project',
+      );
+    });
+
+    tearDown(() async {
+      if (await tempDir.exists()) {
+        await tempDir.delete(recursive: true);
+      }
+    });
+
+    test('creates a project inside the internal projects folder', () async {
+      final project = await library.createProject('Demo Project');
+
+      final expectedPath = p.join(
+        tempDir.path,
+        'projects',
+        'fixed-project',
+        'project.bbox.json',
+      );
+      expect(project.name, 'Demo Project');
+      expect(project.projectFilePath, expectedPath);
+      expect(project.status, ProjectStatus.ready);
+      expect(await File(expectedPath).exists(), isTrue);
+
+      final entries = await library.listProjects();
+      expect(entries, hasLength(1));
+      expect(entries.single.id, 'fixed-project');
+      expect(entries.single.name, 'Demo Project');
+      expect(entries.single.projectFilePath, expectedPath);
+      expect(entries.single.imageCount, 0);
+      expect(entries.single.confirmedImageCount, 0);
+      expect(entries.single.errorImageCount, 0);
+    });
+
+    test('lists projects sorted by updatedAt descending', () async {
+      final first = ProjectLibrary(
+        rootPath: tempDir.path,
+        clock: () => DateTime.utc(2026, 7, 7, 5),
+        idGenerator: (name, timestamp) => 'first',
+      );
+      final second = ProjectLibrary(
+        rootPath: tempDir.path,
+        clock: () => DateTime.utc(2026, 7, 7, 6),
+        idGenerator: (name, timestamp) => 'second',
+      );
+
+      await first.createProject('First');
+      await second.createProject('Second');
+
+      final entries = await library.listProjects();
+      expect(entries.map((entry) => entry.id), ['second', 'first']);
+    });
+
+    test('opens and renames a project without changing the id', () async {
+      await library.createProject('Before');
+
+      final renamed = await library.renameProject('fixed-project', 'After');
+      final opened = await library.openProject('fixed-project');
+      final entries = await library.listProjects();
+
+      expect(renamed.name, 'After');
+      expect(opened.name, 'After');
+      expect(entries.single.id, 'fixed-project');
+      expect(entries.single.name, 'After');
+      expect(p.basename(p.dirname(opened.projectFilePath!)), 'fixed-project');
+    });
+
+    test('refreshes index metadata from saved project state', () async {
+      final created = await library.createProject('Dataset');
+      final updated = created.copyWith(
+        images: const [
+          AnnotatedImage(
+            id: 1,
+            sourcePath: 'C:\\images\\a.jpg',
+            displayName: 'a.jpg',
+            width: 100,
+            height: 80,
+            status: ImageStatus.confirmed,
+          ),
+          AnnotatedImage(
+            id: 2,
+            sourcePath: 'C:\\images\\broken.jpg',
+            displayName: 'broken.jpg',
+            width: 0,
+            height: 0,
+            status: ImageStatus.error,
+            errorMessage: 'decode failed',
+          ),
+        ],
+      );
+      await ProjectStore.save(updated, updated.projectFilePath!);
+
+      await library.refreshEntry(updated);
+
+      final entry = (await library.listProjects()).single;
+      expect(entry.imageCount, 2);
+      expect(entry.confirmedImageCount, 1);
+      expect(entry.errorImageCount, 1);
+    });
+
+    test(
+      'rebuilds index from project directories when index is corrupted',
+      () async {
+        await library.createProject('Recoverable');
+        final indexFile = File(p.join(tempDir.path, 'projects', 'index.json'));
+        await indexFile.writeAsString('{broken', encoding: utf8);
+
+        final entries = await library.listProjects();
+
+        expect(entries, hasLength(1));
+        expect(entries.single.name, 'Recoverable');
+        final raw =
+            jsonDecode(await indexFile.readAsString(encoding: utf8))
+                as Map<String, Object?>;
+        expect(raw['schemaVersion'], ProjectLibrary.currentIndexSchemaVersion);
+      },
+    );
+
+    test('deletes only the internal project directory', () async {
+      final imageDir = Directory(p.join(tempDir.path, 'external-images'));
+      await imageDir.create();
+      final imageFile = File(p.join(imageDir.path, 'a.jpg'));
+      await imageFile.writeAsString('source image bytes');
+
+      final created = await library.createProject('Delete Me');
+      final projectWithImages = created.copyWith(
+        images: [
+          AnnotatedImage(
+            id: 1,
+            sourcePath: p.join(imageDir.path, 'a.jpg'),
+            displayName: 'a.jpg',
+            width: 100,
+            height: 80,
+            status: ImageStatus.confirmed,
+          ),
+        ],
+      );
+      await ProjectStore.save(projectWithImages, created.projectFilePath!);
+      await library.refreshEntry(projectWithImages);
+
+      await library.deleteProject('fixed-project');
+
+      expect(await File(created.projectFilePath!).exists(), isFalse);
+      expect(await imageFile.exists(), isTrue);
+      expect(await library.listProjects(), isEmpty);
+    });
+
+    test('resolves AppData root from the provided environment', () {
+      final appDataRoot = p.join(tempDir.path, 'Roaming');
+
+      final appDataLibrary = ProjectLibrary.appData(
+        environment: {'APPDATA': appDataRoot},
+      );
+
+      expect(appDataLibrary.rootPath, p.join(appDataRoot, 'BBoxLabeler'));
+      expect(
+        appDataLibrary.projectsRootPath,
+        p.join(appDataRoot, 'BBoxLabeler', 'projects'),
+      );
+    });
+  });
+}
