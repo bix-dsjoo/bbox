@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:bbox_labeler/ui/windows_dialog_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -9,10 +11,6 @@ void main() {
       expect(
         WindowsDialogService.imageFileDialogFilter,
         '이미지 파일 (*.jpg;*.jpeg;*.png)|*.jpg;*.jpeg;*.png|모든 파일 (*.*)|*.*',
-      );
-      expect(
-        WindowsDialogService.saveDialogFilter,
-        'COCO JSON (*.json)|*.json|모든 파일 (*.*)|*.*',
       );
       expect(
         WindowsDialogService.debugBuildPickImageFilesScript(),
@@ -38,6 +36,21 @@ void main() {
         'C:\\images\\b.png',
         'C:\\images\\c.jpeg',
       ]);
+    });
+
+    test('has no production reference to the PowerShell save dialog', () {
+      final productionSource = Directory('lib')
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((file) => file.path.endsWith('.dart'))
+          .map((file) => file.readAsStringSync())
+          .join('\n');
+
+      expect(productionSource, isNot(contains('SaveFileDialog')));
+      expect(
+        productionSource,
+        isNot(contains('WindowsDialogService.saveCocoFile')),
+      );
     });
   });
 }

@@ -11,7 +11,11 @@ class _QuickLabelBar extends StatefulWidget {
 }
 
 class _QuickLabelBarState extends State<_QuickLabelBar> {
+  static const _popoverMargin = 12.0;
+  static const _popoverMaxWidth = 380.0;
+
   final LayerLink _labelManagementLink = LayerLink();
+  final GlobalKey _labelManagementTargetKey = GlobalKey();
   OverlayEntry? _labelManagementEntry;
 
   @override
@@ -114,6 +118,7 @@ class _QuickLabelBarState extends State<_QuickLabelBar> {
 
   Widget _buildManageLabelsButton() {
     return CompositedTransformTarget(
+      key: _labelManagementTargetKey,
       link: _labelManagementLink,
       child: IconButton(
         key: const ValueKey('open-label-management'),
@@ -136,38 +141,64 @@ class _QuickLabelBarState extends State<_QuickLabelBar> {
     }
     final overlay = Overlay.of(context);
     _labelManagementEntry = OverlayEntry(
-      builder: (context) => Stack(
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onTap: _removePopover,
-            ),
-          ),
-          CompositedTransformFollower(
-            link: _labelManagementLink,
-            showWhenUnlinked: false,
-            targetAnchor: Alignment.topLeft,
-            followerAnchor: Alignment.bottomLeft,
-            offset: const Offset(0, -8),
-            child: LabelManagementPopover(
-              labels: widget.project.labels,
-              onCreateLabel: (name, color, shortcut) {
-                widget.controller.addLabel(name, color, shortcut: shortcut);
-                _removePopover();
-              },
-              onUpdateLabel: (id, name, color, shortcut) {
-                widget.controller.updateLabel(
-                  labelId: id,
-                  name: name,
-                  color: color,
-                  shortcut: shortcut,
-                );
-                _removePopover();
-              },
-            ),
-          ),
-        ],
+      builder: (context) => LayoutBuilder(
+        builder: (context, constraints) {
+          final overlayBox = context.findRenderObject()! as RenderBox;
+          final targetBox =
+              _labelManagementTargetKey.currentContext!.findRenderObject()!
+                  as RenderBox;
+          final targetLeft = targetBox
+              .localToGlobal(Offset.zero, ancestor: overlayBox)
+              .dx;
+          final popoverWidth = math.min(
+            _popoverMaxWidth,
+            constraints.maxWidth - (_popoverMargin * 2),
+          );
+          final popoverLeft = targetLeft.clamp(
+            _popoverMargin,
+            constraints.maxWidth - _popoverMargin - popoverWidth,
+          );
+          return Stack(
+            children: [
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTap: _removePopover,
+                ),
+              ),
+              CompositedTransformFollower(
+                link: _labelManagementLink,
+                showWhenUnlinked: false,
+                targetAnchor: Alignment.topLeft,
+                followerAnchor: Alignment.bottomLeft,
+                offset: Offset(popoverLeft - targetLeft, -8),
+                child: SizedBox(
+                  width: popoverWidth,
+                  child: LabelManagementPopover(
+                    labels: widget.project.labels,
+                    onCreateLabel: (name, color, shortcut) {
+                      widget.controller.addLabel(
+                        name,
+                        color,
+                        shortcut: shortcut,
+                      );
+                      _removePopover();
+                    },
+                    onUpdateLabel: (id, name, color, shortcut) {
+                      widget.controller.updateLabel(
+                        labelId: id,
+                        name: name,
+                        color: color,
+                        shortcut: shortcut,
+                      );
+                      _removePopover();
+                    },
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
     overlay.insert(_labelManagementEntry!);

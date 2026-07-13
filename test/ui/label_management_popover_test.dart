@@ -4,6 +4,43 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('keeps the primary action reachable at narrow desktop width', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(240, 600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 216,
+              child: LabelManagementPopover(
+                labels: const [],
+                onCreateLabel: (_, _, _) {},
+                onUpdateLabel: (_, _, _, _) {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final popover = tester.getRect(
+      find.byKey(const ValueKey('label-management-popover')),
+    );
+    final action = tester.getRect(
+      find.byKey(const ValueKey('create-managed-label')),
+    );
+    expect(popover.contains(action.topLeft), isTrue);
+    expect(popover.contains(action.bottomRight), isTrue);
+    expect(
+      find.byKey(const ValueKey('create-managed-label')).hitTestable(),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('creates a label with name color and shortcut', (tester) async {
     String? createdName;
     int? createdColor;

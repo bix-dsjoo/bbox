@@ -294,6 +294,87 @@ void main() {
       },
     );
 
+    testWidgets(
+      'label management popover stays inside a 1585x943 viewport at the right edge',
+      (tester) async {
+        final controller = AppController()
+          ..loadProject(
+            project().copyWith(labels: createDefaultLabels().take(10).toList()),
+          );
+
+        await tester.binding.setSurfaceSize(const Size(1585, 943));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await tester.pumpWidget(app(controller));
+        await tapVisible(
+          tester,
+          find.byKey(const ValueKey('open-label-management')),
+        );
+        await tester.pump();
+
+        const viewport = Rect.fromLTWH(0, 0, 1585, 943);
+        final controls = <String, Finder>{
+          'label-management-popover': find.byKey(
+            const ValueKey('label-management-popover'),
+          ),
+          'label-shortcut-input': find.byKey(
+            const ValueKey('label-shortcut-input'),
+          ),
+          'color control': find.byType(PopupMenuButton<int>),
+          'create-managed-label': find.byKey(
+            const ValueKey('create-managed-label'),
+          ),
+        };
+        for (final MapEntry(key: name, value: finder) in controls.entries) {
+          final rect = tester.getRect(finder);
+          expect(
+            viewport.contains(rect.topLeft),
+            isTrue,
+            reason: '$name top-left must be inside the viewport',
+          );
+          expect(
+            viewport.contains(rect.bottomRight),
+            isTrue,
+            reason: '$name bottom-right must be inside the viewport',
+          );
+        }
+      },
+    );
+
+    testWidgets('label management popover stays inside a 1280x720 viewport', (
+      tester,
+    ) async {
+      final controller = AppController()
+        ..loadProject(
+          project().copyWith(labels: createDefaultLabels().take(10).toList()),
+        );
+
+      await tester.binding.setSurfaceSize(const Size(1280, 720));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(app(controller));
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('open-label-management')),
+      );
+      await tester.pump();
+
+      final popover = tester.getRect(
+        find.byKey(const ValueKey('label-management-popover')),
+      );
+      expect(
+        const Rect.fromLTWH(0, 0, 1280, 720).contains(popover.topLeft),
+        isTrue,
+      );
+      expect(
+        const Rect.fromLTWH(0, 0, 1280, 720).contains(popover.bottomRight),
+        isTrue,
+      );
+      final action = tester.getRect(
+        find.byKey(const ValueKey('create-managed-label')),
+      );
+      expect(popover.contains(action.topLeft), isTrue);
+      expect(popover.contains(action.bottomRight), isTrue);
+    });
+
     testWidgets('drawn unlabeled box stays selected and shows quick labels', (
       tester,
     ) async {

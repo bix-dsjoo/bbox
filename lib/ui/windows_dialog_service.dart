@@ -9,7 +9,6 @@ class WindowsDialogService {
   static const imageFilePickerTitle = '이미지 파일 선택';
   static const imageFileDialogFilter =
       '이미지 파일 (*.jpg;*.jpeg;*.png)|*.jpg;*.jpeg;*.png|모든 파일 (*.*)|*.*';
-  static const saveDialogFilter = 'COCO JSON (*.json)|*.json|모든 파일 (*.*)|*.*';
 
   static Future<String?> pickFolder({String title = folderPickerTitle}) {
     return _runPowerShellDialog(_buildPickFolderScript(title));
@@ -48,10 +47,6 @@ class WindowsDialogService {
         .toList(growable: false);
   }
 
-  static Future<String?> saveCocoFile() {
-    return _runPowerShellDialog(_buildSaveCocoFileScript());
-  }
-
   static String _buildPickFolderScript(String title) =>
       '''
 Add-Type -AssemblyName System.Windows.Forms
@@ -71,18 +66,6 @@ Add-Type -AssemblyName System.Windows.Forms
 \$dialog.Title = '${_escapePowerShellSingleQuotedString(title)}'
 if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   [Console]::Out.Write((\$dialog.FileNames -join [Environment]::NewLine))
-}
-''';
-
-  static String _buildSaveCocoFileScript() =>
-      '''
-Add-Type -AssemblyName System.Windows.Forms
-\$dialog = New-Object System.Windows.Forms.SaveFileDialog
-\$dialog.Filter = '$saveDialogFilter'
-\$dialog.Title = 'COCO JSON 내보내기'
-\$dialog.DefaultExt = 'json'
-if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  [Console]::Out.Write(\$dialog.FileName)
 }
 ''';
 

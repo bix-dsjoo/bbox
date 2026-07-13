@@ -248,6 +248,9 @@ void main() {
       expect(find.text('검토 필요 이미지: 2'), findsOneWidget);
       expect(find.text('라벨 필요한 자동 박스: 1'), findsOneWidget);
       expect(find.text('문제 있는 이미지: 1'), findsOneWidget);
+      await tester.tap(find.text(WorkbenchCopy.close));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
     });
   });
 }

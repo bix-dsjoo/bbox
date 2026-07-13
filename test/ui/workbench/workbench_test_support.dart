@@ -7,6 +7,7 @@ export 'package:bbox_labeler/annotation/models.dart';
 export 'package:bbox_labeler/detector/detector.dart';
 export 'package:bbox_labeler/ui/app_controller.dart';
 export 'package:bbox_labeler/ui/app_theme.dart';
+export 'package:bbox_labeler/ui/coco_export_destination_picker.dart';
 export 'package:bbox_labeler/ui/image_import_picker.dart';
 export 'package:bbox_labeler/ui/workbench_copy.dart';
 export 'package:bbox_labeler/ui/workbench_screen.dart';
@@ -18,6 +19,7 @@ import 'dart:io';
 import 'package:bbox_labeler/annotation/default_labels.dart';
 import 'package:bbox_labeler/annotation/models.dart';
 import 'package:bbox_labeler/ui/app_controller.dart';
+import 'package:bbox_labeler/ui/coco_export_destination_picker.dart';
 import 'package:bbox_labeler/ui/image_import_picker.dart';
 import 'package:bbox_labeler/ui/workbench_screen.dart';
 import 'package:flutter/foundation.dart';
@@ -34,13 +36,28 @@ img.Image fixtureImage(int width, int height) {
 Widget app(
   AppController controller, {
   ImageImportPicker imageImportPicker = const FakeImageImportPicker(),
+  CocoExportDestinationPicker exportDestinationPicker =
+      const FakeCocoExportDestinationPicker(),
+  Future<void> Function(String path)? exportWriter,
 }) {
   return MaterialApp(
     home: WorkbenchScreen(
       controller: controller,
       imageImportPicker: imageImportPicker,
+      exportDestinationPicker: exportDestinationPicker,
+      exportWriter: exportWriter,
     ),
   );
+}
+
+class FakeCocoExportDestinationPicker extends CocoExportDestinationPicker {
+  const FakeCocoExportDestinationPicker({this.onPick});
+
+  final Future<String?> Function()? onPick;
+
+  @override
+  Future<String?> pickDestination() =>
+      onPick?.call() ?? SynchronousFuture<String?>(null);
 }
 
 class FakeImageImportPicker extends ImageImportPicker {

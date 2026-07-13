@@ -13,10 +13,11 @@ import '../../viewer/viewport_transform.dart';
 import '../app_controller.dart';
 import '../app_theme.dart';
 import '../canvas_interaction.dart';
+import '../coco_export_destination_picker.dart';
+import '../coco_export_warning_dialog.dart';
 import '../image_import_picker.dart';
 import '../label_management_popover.dart';
 import '../workbench_copy.dart';
-import '../windows_dialog_service.dart';
 
 part 'workbench_shared.dart';
 part 'image_queue_panel.dart';
@@ -95,10 +96,14 @@ class WorkbenchScreen extends StatelessWidget {
     super.key,
     required this.controller,
     this.imageImportPicker = const WindowsImageImportPicker(),
+    this.exportDestinationPicker = const WindowsCocoExportDestinationPicker(),
+    this.exportWriter,
   });
 
   final AppController controller;
   final ImageImportPicker imageImportPicker;
+  final CocoExportDestinationPicker exportDestinationPicker;
+  final Future<void> Function(String path)? exportWriter;
 
   @override
   Widget build(BuildContext context) {
@@ -411,46 +416,23 @@ class WorkbenchScreen extends StatelessWidget {
     final summary = controller.exportSummary();
     await showDialog<void>(
       context: context,
-      builder: (context) {
-        final hasErrors = summary.hasBlockingErrors;
-        return AlertDialog(
-          title: Text(hasErrors ? 'COCO 내보내기 차단' : 'COCO 내보내기 경고'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('검토 필요 이미지: ${summary.unconfirmedImageCount}'),
-              Text('라벨 필요한 자동 박스: ${summary.unlabeledProposalBoxCount}'),
-              Text('문제 있는 이미지: ${summary.errorImageCount}'),
-              for (final error in summary.blockingErrors)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(error, style: const TextStyle(color: Colors.red)),
-                ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text(WorkbenchCopy.close),
+      builder: (dialogContext) => CocoExportWarningDialog(
+        summary: summary,
+        pickDestination: exportDestinationPicker.pickDestination,
+        writeExport: exportWriter ?? controller.exportCocoFile,
+        onClose: () => Navigator.of(dialogContext).pop(),
+        onSuccess: (path) {
+          Navigator.of(dialogContext).pop();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'COCO JSON을 저장했습니다: $path',
+                key: const ValueKey('coco-export-success'),
+              ),
             ),
-            ElevatedButton(
-              onPressed: hasErrors
-                  ? null
-                  : () async {
-                      final path = await WindowsDialogService.saveCocoFile();
-                      if (path != null) {
-                        await controller.exportCocoFile(path);
-                      }
-                      if (context.mounted) {
-                        Navigator.of(context).pop();
-                      }
-                    },
-              child: const Text(WorkbenchCopy.continueAction),
-            ),
-          ],
-        );
-      },
+          );
+        },
+      ),
     );
   }
 
