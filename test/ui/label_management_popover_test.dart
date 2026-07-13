@@ -33,8 +33,18 @@ void main() {
     final action = tester.getRect(
       find.byKey(const ValueKey('create-managed-label')),
     );
+    final nameInput = tester.getRect(
+      find.byKey(const ValueKey('label-name-input')),
+    );
+    final shortcutInput = tester.getRect(
+      find.byKey(const ValueKey('label-shortcut-input')),
+    );
     expect(popover.contains(action.topLeft), isTrue);
     expect(popover.contains(action.bottomRight), isTrue);
+    expect(nameInput.height, greaterThanOrEqualTo(44));
+    expect(shortcutInput.height, greaterThanOrEqualTo(44));
+    expect(action.height, greaterThanOrEqualTo(40));
+    expect(nameInput.bottom, lessThanOrEqualTo(shortcutInput.top));
     expect(
       find.byKey(const ValueKey('create-managed-label')).hitTestable(),
       findsOneWidget,

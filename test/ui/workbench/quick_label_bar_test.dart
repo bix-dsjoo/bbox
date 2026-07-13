@@ -375,6 +375,35 @@ void main() {
       expect(popover.contains(action.bottomRight), isTrue);
     });
 
+    testWidgets(
+      'label management popover stays inside at a left-edge trigger',
+      (tester) async {
+        final controller = AppController()
+          ..loadProject(project().copyWith(labels: const []));
+
+        await tester.binding.setSurfaceSize(const Size(800, 720));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await tester.pumpWidget(app(controller));
+        await tapVisible(
+          tester,
+          find.byKey(const ValueKey('open-label-management')),
+        );
+        await tester.pump();
+
+        final trigger = tester.getRect(
+          find.byKey(const ValueKey('open-label-management')),
+        );
+        final popover = tester.getRect(
+          find.byKey(const ValueKey('label-management-popover')),
+        );
+        const viewport = Rect.fromLTWH(0, 0, 800, 720);
+        expect(trigger.center.dx, lessThan(viewport.center.dx));
+        expect(popover.left, greaterThanOrEqualTo(12));
+        expect(viewport.contains(popover.topLeft), isTrue);
+        expect(viewport.contains(popover.bottomRight), isTrue);
+      },
+    );
+
     testWidgets('drawn unlabeled box stays selected and shows quick labels', (
       tester,
     ) async {

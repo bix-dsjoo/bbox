@@ -414,26 +414,27 @@ class WorkbenchScreen extends StatelessWidget {
 
   Future<void> _showExportWarnings(BuildContext context) async {
     final summary = controller.exportSummary();
-    await showDialog<void>(
+    final savedPath = await showDialog<String>(
       context: context,
+      barrierDismissible: false,
       builder: (dialogContext) => CocoExportWarningDialog(
         summary: summary,
         pickDestination: exportDestinationPicker.pickDestination,
         writeExport: exportWriter ?? controller.exportCocoFile,
         onClose: () => Navigator.of(dialogContext).pop(),
-        onSuccess: (path) {
-          Navigator.of(dialogContext).pop();
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'COCO JSON을 저장했습니다: $path',
-                key: const ValueKey('coco-export-success'),
-              ),
-            ),
-          );
-        },
+        onSuccess: (path) => Navigator.of(dialogContext).pop(path),
       ),
     );
+    if (savedPath != null && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'COCO JSON을 저장했습니다: $savedPath',
+            key: const ValueKey('coco-export-success'),
+          ),
+        ),
+      );
+    }
   }
 
   void _showError(BuildContext context, String message) {

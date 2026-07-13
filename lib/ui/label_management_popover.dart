@@ -63,64 +63,72 @@ class _LabelManagementPopoverState extends State<LabelManagementPopover> {
             children: [
               LayoutBuilder(
                 builder: (context, constraints) {
-                  final form = Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          key: const ValueKey('label-name-input'),
-                          controller: _name,
-                          decoration: const InputDecoration(
-                            isDense: true,
-                            labelText: '라벨 이름',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
+                  final nameInput = TextField(
+                    key: const ValueKey('label-name-input'),
+                    controller: _name,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: '라벨 이름',
+                      border: OutlineInputBorder(),
+                    ),
+                  );
+                  final shortcutInput = TextField(
+                    key: const ValueKey('label-shortcut-input'),
+                    controller: _shortcut,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: '키',
+                      border: OutlineInputBorder(),
+                    ),
+                  );
+                  final colorMenu = _ColorMenu(
+                    value: _color,
+                    onChanged: (value) => setState(() => _color = value),
+                  );
+                  final primaryAction = KeyedSubtree(
+                    key: ValueKey(
+                      isEditing
+                          ? 'update-managed-label-forui'
+                          : 'create-managed-label-forui',
+                    ),
+                    child: FilledButton(
+                      key: ValueKey(
+                        isEditing
+                            ? 'update-managed-label'
+                            : 'create-managed-label',
                       ),
-                      const SizedBox(width: 8),
-                      SizedBox(
-                        width: 82,
-                        child: TextField(
-                          key: const ValueKey('label-shortcut-input'),
-                          controller: _shortcut,
-                          decoration: const InputDecoration(
-                            isDense: true,
-                            labelText: '키',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      _ColorMenu(
-                        value: _color,
-                        onChanged: (value) => setState(() => _color = value),
-                      ),
-                      const SizedBox(width: 8),
-                      KeyedSubtree(
-                        key: ValueKey(
-                          isEditing
-                              ? 'update-managed-label-forui'
-                              : 'create-managed-label-forui',
-                        ),
-                        child: FilledButton(
-                          key: ValueKey(
-                            isEditing
-                                ? 'update-managed-label'
-                                : 'create-managed-label',
-                          ),
-                          onPressed: isEditing ? _update : _create,
-                          child: Text(isEditing ? '수정' : '추가'),
-                        ),
-                      ),
-                    ],
+                      onPressed: isEditing ? _update : _create,
+                      child: Text(isEditing ? '수정' : '추가'),
+                    ),
                   );
                   if (constraints.maxWidth < 300) {
-                    return FittedBox(
-                      fit: BoxFit.scaleDown,
-                      alignment: Alignment.centerLeft,
-                      child: SizedBox(width: 300, child: form),
+                    return Column(
+                      children: [
+                        nameInput,
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(child: shortcutInput),
+                            const SizedBox(width: 6),
+                            colorMenu,
+                            const SizedBox(width: 6),
+                            primaryAction,
+                          ],
+                        ),
+                      ],
                     );
                   }
-                  return form;
+                  return Row(
+                    children: [
+                      Expanded(child: nameInput),
+                      const SizedBox(width: 8),
+                      SizedBox(width: 82, child: shortcutInput),
+                      const SizedBox(width: 8),
+                      colorMenu,
+                      const SizedBox(width: 8),
+                      primaryAction,
+                    ],
+                  );
                 },
               ),
               if (_errorText != null) ...[
