@@ -88,3 +88,43 @@ Implementation commit: `587e1fd` (`fix: make export flow recoverable and popover
 - Scope is limited to the two reported root causes and their tests.
 - Existing project persistence, COCO generation, label create/update behavior, and automation gating remain unchanged.
 - The native COM save picker itself cannot be opened in headless Flutter tests; configuration and the absence of the obsolete PowerShell path are automated, while final owned-window behavior still requires Windows release smoke QA.
+
+## Reviewer correction pass
+
+Review result addressed: the first implementation was rejected because an in-flight route could still be dismissed, the narrow form scaled all controls, left-edge placement lacked an explicit regression, and the success tests did not parse a real `AppController` COCO write.
+
+Correction implementation commit: `bd608bb0de8f79d645313990b1afbdbebecc8bc0`
+
+### Corrections
+
+- `CocoExportWarningDialog` now wraps its dialog in `PopScope(canPop: !_inFlight)` so Escape/back cannot pop an active attempt.
+- The workbench uses `showDialog<String>(barrierDismissible: false)`. A successful path is returned by the owned dialog route; only after that route completes does the workbench show saved-path feedback. This prevents stale `BuildContext` route pops and guarantees one clean close.
+- Success clears local busy state in `finally`, waits for the rebuilt pop scope, then requests the single owned route close.
+- Narrow label management no longer uses a whole-form `FittedBox`. It reflows to a full-size name field on the first row and full-size shortcut/color/primary-action controls on the second row.
+- Added explicit left-edge trigger containment coverage at 800x720.
+- Added a pure deterministic real-writer test that awaits `AppController.exportCocoFile`, decodes the produced JSON, and asserts `images`, `annotations`, `categories`, file name, category id/name, and annotation filtering. Cancel/retry remains covered by the dialog lifecycle widget test; together they cover the state transition and the real export writer without mixing real filesystem I/O into Flutter FakeAsync.
+
+### Correction RED evidence
+
+1. `flutter test test/ui/workbench/export_success_integration_test.dart --plain-name "in-flight export blocks barrier and Escape until one clean success close" --no-pub`
+   - Failed as expected: saved-path feedback was absent after barrier/Escape/back interacted with the in-flight route.
+2. `flutter test test/ui/label_management_popover_test.dart --plain-name "keeps the primary action reachable at narrow desktop width" --no-pub`
+   - Failed as expected: the name input height was `30.72`, below the required unscaled 44 logical pixels.
+3. The explicit left-edge test passed immediately because the prior collision clamp already handled the left edge; it prevents regression to a fixed right-anchor solution.
+4. Initial attempts to combine WidgetTester FakeAsync, a real filesystem writer, and route ownership left the outer Flutter test process pending. The final design follows the repository's pure integration-test pattern: lifecycle stays in bounded widget tests, while the actual `AppController` file write is awaited in a pure `test(...)`.
+
+### Correction GREEN evidence
+
+- Delayed writer route-ownership regression: 1/1 passed; barrier, Escape, and back remain blocked until completion, followed by one close and saved-path feedback with no exception.
+- Narrow responsive reflow regression: 1/1 passed with name/shortcut heights at least 44 and primary action at least 40 logical pixels.
+- Left-edge containment regression: 1/1 passed.
+- Pure real COCO writer: 1/1 passed and parsed the generated JSON structure/content.
+- Reviewer-focused combined suite: 45/45 passed in 10.3 seconds.
+- Final relevant focused suite after the analyzer cleanup: 32/32 passed.
+- Final full suite: `flutter test --no-pub` passed 356/356 in 12.5 seconds.
+- Final static analysis: `flutter analyze --no-pub` reported `No issues found!` in 5.2 seconds.
+- All changed Dart files were formatted; `git diff --check` passed.
+
+### Remaining concern
+
+- As before, headless tests validate native picker configuration and lifecycle seams but cannot exercise the visible Windows COM picker itself; Windows Release smoke QA remains required for HWND/z-order behavior.
