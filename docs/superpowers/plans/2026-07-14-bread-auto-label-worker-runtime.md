@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Consume manifest schema version 1 from `2026-07-14-bread-model-data-evaluation.md`; do not hard-code category order or calibration thresholds in worker code.
-- Keep the detector/classifier/verifier loaded once per persistent worker process.
+- Keep the detector and classifier loaded once per persistent worker process. Construct and load a verifier only when manifest `verifier.kind` is not `none`; `kind=none` must leave both the verifier path and runtime verifier object unset.
 - Run classifier inference as one crop batch per image; invoke the verifier only for classifier-ambiguous crops.
 - Return original-image pixel coordinates; reject non-finite values, clamp finite coordinates to image bounds, and discard a box when clamping leaves non-positive width or height.
 - A confident result with no quality reason returns an accepted label; any quality warning prevents automatic acceptance even when classification confidence is high.
@@ -64,6 +64,12 @@ def test_classifier_hash_failure_is_reported_as_optional_stage_error():
     resolved = resolve_model_paths(path, load_pipeline_manifest(path))
     self.assertIsNotNone(resolved.classifier_error)
     self.assertIsNone(resolved.classifier_path)
+
+def test_none_verifier_resolves_without_a_model_path_or_error():
+    path = self.write_valid_manifest(verifier={"kind": "none", "file": None, "sha256": None, "scoreThreshold": None, "marginThreshold": None})
+    resolved = resolve_model_paths(path, load_pipeline_manifest(path))
+    self.assertIsNone(resolved.verifier_path)
+    self.assertIsNone(resolved.verifier_error)
 ```
 
 - [ ] **Step 2: Run tests and verify failure**
@@ -106,6 +112,7 @@ def validate_labels(labels):
 ```
 
 Detector path/hash errors raise `ManifestError`. Classifier and verifier path/hash errors populate `ResolvedModels.classifier_error` or `verifier_error` so detection can remain available in degraded mode.
+For manifest `verifier.kind == "none"`, do not resolve, hash, import, or construct any verifier implementation; return `verifier_path=None` and `verifier_error=None` as the intentional disabled state.
 
 - [ ] **Step 4: Run tests and real manifest validation**
 
@@ -228,6 +235,14 @@ def test_classifier_receives_one_crop_batch_and_verifier_only_ambiguous_crop():
     self.assertEqual(engine.verifier.crop_count, 1)
     self.assertEqual([item["label"]["state"] for item in result["boxes"]], ["accepted", "review"])
 
+def test_none_verifier_manifest_skips_verifier_construction():
+    factory = RecordingVerifierFactory()
+    engine = pipeline_engine_from_manifest(manifest(verifier_kind="none"), verifier_factory=factory)
+    result = engine.detect_bytes(png_bytes())
+    self.assertEqual(factory.calls, [])
+    self.assertIsNone(engine.verifier)
+    self.assertEqual(result["boxes"][1]["label"]["state"], "review")
+
 def test_classifier_failure_preserves_gray_boxes():
     engine = pipeline_engine(two_box_detector(), failing_classifier(), None)
     result = engine.detect_bytes(png_bytes())
@@ -267,6 +282,8 @@ def classify_crops(self, image, boxes):
         decisions.append(classify_policy(scores, box, self.image_size, self.manifest, verifier=verifier))
     return decisions, []
 ```
+
+The engine factory must branch on the validated manifest before any verifier import or construction. When `verifier.kind == "none"`, assign `self.verifier = None`, do not call `verifier_factory`, and leave classifier-ambiguous decisions in `review`. Only non-`none` verifier kinds may resolve and construct the optional verifier once for the worker lifetime.
 
 Calculate SHA-256 from request bytes and return it in `image.sha256`. Clamp finite detector and supplied-classification coordinates to decoded dimensions, discard zero-area results, and add `edge_clipped` when clamping changed a box. Apply duplicate-IoU review reasons after NMS.
 
