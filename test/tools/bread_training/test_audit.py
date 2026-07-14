@@ -59,6 +59,36 @@ def catalog(images, annotations):
 
 
 class AuditCatalogTest(unittest.TestCase):
+    def test_audit_rejects_non_integer_registry_and_annotation_category_ids(self):
+        for invalid_id in (True, 1.0):
+            with self.subTest(path="registry", invalid_id=invalid_id):
+                report = audit_catalog(
+                    Catalog(
+                        labels=((invalid_id, "Walnut Donut"),),
+                        images=(image(),),
+                        annotations=(),
+                        raw_root="C:/raw",
+                    )
+                )
+
+                self.assertEqual(
+                    {issue.code for issue in report.issues},
+                    {"category_id_invalid"},
+                )
+
+            with self.subTest(path="annotation", invalid_id=invalid_id):
+                report = audit_catalog(
+                    catalog(
+                        [image()],
+                        [annotation(category_id=invalid_id)],
+                    )
+                )
+
+                self.assertEqual(
+                    {issue.code for issue in report.issues},
+                    {"annotation_category_id_invalid"},
+                )
+
     def test_audit_rejects_non_integer_single_image_category_id(self):
         for invalid_id in (True, 1.0):
             with self.subTest(invalid_id=invalid_id):

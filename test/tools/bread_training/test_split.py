@@ -285,6 +285,34 @@ class CatalogLoadingTest(unittest.TestCase):
 
 
 class OutputGuardTest(unittest.TestCase):
+    def test_cli_rejects_lookalike_output_directories_outside_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw_root = root / "raw"
+            raw_root.mkdir()
+            catalog = catalog_with_83_mixed_images()
+            payload = catalog.to_json()
+            payload["raw_root"] = str(raw_root)
+            catalog_path = root / "catalog.json"
+            catalog_path.write_text(json.dumps(payload), encoding="utf-8")
+            audit_output = root / "unrelated" / "outputs" / "audit.json"
+            split_output = root / "unrelated" / "datasets" / "split.json"
+
+            with self.assertRaises(SplitError):
+                main(
+                    [
+                        "--catalog",
+                        str(catalog_path),
+                        "--audit-output",
+                        str(audit_output),
+                        "--split-output",
+                        str(split_output),
+                    ]
+                )
+
+            self.assertFalse(audit_output.exists())
+            self.assertFalse(split_output.exists())
+
     def test_cli_rejects_outputs_below_catalog_raw_root(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

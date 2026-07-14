@@ -24,6 +24,7 @@ from tools.bread_training.catalog import (
 
 FOLD_SIZES = (17, 17, 17, 16, 16)
 DEFAULT_SEED = 20260714
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 class SplitError(ValueError):
@@ -552,9 +553,12 @@ def _write_json_under(
         pass
     else:
         raise SplitError(f"Refusing to write under catalog raw root: {output}")
-    if required_directory not in output.parts:
+    trusted_directory = (REPOSITORY_ROOT / required_directory).resolve()
+    try:
+        output.relative_to(trusted_directory)
+    except ValueError:
         raise SplitError(
-            f"Refusing to write outside an ignored {required_directory}/ directory: {output}"
+            f"Refusing to write outside repository {required_directory}/: {output}"
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(

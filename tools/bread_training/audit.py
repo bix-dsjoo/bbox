@@ -66,7 +66,13 @@ def audit_catalog(catalog: Catalog) -> AuditReport:
     issues: list[AuditIssue] = []
     label_names: dict[int, str] = {}
     for category_id, category_name in catalog.labels:
-        if category_id in label_names:
+        if type(category_id) is not int:
+            _issue(
+                issues,
+                "category_id_invalid",
+                "Catalog category id must be an integer",
+            )
+        elif category_id in label_names:
             _issue(
                 issues,
                 "duplicate_category_id",
@@ -154,8 +160,15 @@ def audit_catalog(catalog: Catalog) -> AuditReport:
                 annotation_id=annotation.annotation_id,
             )
 
-        expected_name = label_names.get(annotation.category_id)
-        if expected_name is None:
+        if type(annotation.category_id) is not int:
+            _issue(
+                issues,
+                "annotation_category_id_invalid",
+                "Annotation category id must be an integer",
+                image_key=annotation.image_key,
+                annotation_id=annotation.annotation_id,
+            )
+        elif (expected_name := label_names.get(annotation.category_id)) is None:
             _issue(
                 issues,
                 "category_missing",
