@@ -101,6 +101,33 @@ def audit_catalog(catalog: Catalog) -> AuditReport:
                 "Image dimensions must be positive",
                 image_key=image.key,
             )
+        if image.source_kind == "single_bread":
+            if image.category_id is None or image.category_name is None:
+                _issue(
+                    issues,
+                    "single_image_category_missing",
+                    "Single-product image must have a category id and name",
+                    image_key=image.key,
+                )
+            elif (
+                type(image.category_id) is not int
+                or label_names.get(image.category_id) != image.category_name
+            ):
+                _issue(
+                    issues,
+                    "single_image_category_mismatch",
+                    "Single-product image category must match the catalog registry",
+                    image_key=image.key,
+                )
+        elif image.source_kind == "mixed_scene" and (
+            image.category_id is not None or image.category_name is not None
+        ):
+            _issue(
+                issues,
+                "mixed_image_category_present",
+                "Mixed-scene image category metadata must be unset",
+                image_key=image.key,
+            )
 
     seen_annotation_ids: set[str] = set()
     seen_boxes: set[tuple[str, tuple[float, ...]]] = set()

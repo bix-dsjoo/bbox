@@ -399,19 +399,31 @@ def _assign_single_product_groups(
     return dict(sorted(result.items()))
 
 
+_MISSING = object()
+
+
+def _validated_source_key(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise LeakageError(f"Derived record has malformed {field_name}")
+    return value
+
+
 def _record_sources(record: object) -> tuple[str, ...]:
     sources: list[str] = []
-    source_key = getattr(record, "source_key", None)
-    if isinstance(source_key, str):
-        sources.append(source_key)
-    source_keys = getattr(record, "source_keys", None)
-    if isinstance(source_keys, (tuple, list)) and all(
-        isinstance(value, str) for value in source_keys
-    ):
-        sources.extend(source_keys)
-    background_key = getattr(record, "background_key", None)
-    if isinstance(background_key, str):
-        sources.append(background_key)
+    source_key = getattr(record, "source_key", _MISSING)
+    if source_key is not _MISSING:
+        sources.append(_validated_source_key(source_key, "source_key"))
+    source_keys = getattr(record, "source_keys", _MISSING)
+    if source_keys is not _MISSING:
+        if not isinstance(source_keys, (tuple, list)):
+            raise LeakageError("Derived record has malformed source_keys")
+        sources.extend(
+            _validated_source_key(value, "source_keys entry")
+            for value in source_keys
+        )
+    background_key = getattr(record, "background_key", _MISSING)
+    if background_key is not _MISSING:
+        sources.append(_validated_source_key(background_key, "background_key"))
     return tuple(dict.fromkeys(sources))
 
 
@@ -442,6 +454,18 @@ def _require_json_int(value: Any, field: str) -> int:
     if type(value) is not int:
         raise SplitError(f"{field} must be a JSON integer")
     return value
+
+
+def _require_json_bbox(value: Any) -> tuple[float, float, float, float]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or any(type(coordinate) not in (int, float) for coordinate in value)
+    ):
+        raise SplitError(
+            "annotation bbox must be a four-number JSON array without booleans"
+        )
+    return tuple(float(coordinate) for coordinate in value)
 
 
 def load_catalog(path: Path) -> Catalog:
@@ -484,7 +508,7 @@ def load_catalog(path: Path) -> Catalog:
                     item["category_id"], "annotation category id"
                 ),
                 category_name=str(item["category_name"]),
-                bbox=tuple(float(value) for value in item["bbox"]),
+                bbox=_require_json_bbox(item["bbox"]),
             )
             for item in payload["annotations"]
         )
@@ -517,8 +541,17 @@ def _fold_summary(
     return rows
 
 
-def _write_json_under(path: Path, payload: Any, required_directory: str) -> None:
+def _write_json_under(
+    path: Path, payload: Any, required_directory: str, raw_root: Path
+) -> None:
     output = path.resolve()
+    resolved_raw_root = raw_root.resolve()
+    try:
+        output.relative_to(resolved_raw_root)
+    except ValueError:
+        pass
+    else:
+        raise SplitError(f"Refusing to write under catalog raw root: {output}")
     if required_directory not in output.parts:
         raise SplitError(
             f"Refusing to write outside an ignored {required_directory}/ directory: {output}"
@@ -569,12 +602,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = _parse_args(argv)
     catalog = load_catalog(args.catalog)
     report: AuditReport = audit_catalog(catalog)
-    _write_json_under(args.audit_output, report.to_json(), "outputs")
+    raw_root = Path(catalog.raw_root)
+    _write_json_under(args.audit_output, report.to_json(), "outputs", raw_root)
     if not report.ok:
         codes = ", ".join(sorted({issue.code for issue in report.issues}))
         raise SplitError(f"Catalog audit failed: {codes}")
     payload = build_split_payload(catalog, folds=args.folds, seed=args.seed)
-    _write_json_under(args.split_output, payload, "datasets")
+    _write_json_under(args.split_output, payload, "datasets", raw_root)
     for row in payload["fold_summary"]:
         print(
             f"fold={row['fold']} size={row['size']} "

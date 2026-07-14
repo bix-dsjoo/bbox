@@ -12,15 +12,24 @@ from tools.bread_training.catalog import (
 LABELS = ((1, "Walnut Donut"), (2, "Croffle"))
 
 
-def image(key="Test_20260714/E0501.jpg", width=100, height=80):
+def image(
+    key="Test_20260714/E0501.jpg",
+    width=100,
+    height=80,
+    source_kind="mixed_scene",
+    category_id=None,
+    category_name=None,
+):
     return CatalogImage(
         key=key,
         absolute_path=f"C:/raw/{key}",
         sha256="a" * 64,
         width=width,
         height=height,
-        source_kind="mixed_scene",
+        source_kind=source_kind,
         source_group=key.split("/")[0],
+        category_id=category_id,
+        category_name=category_name,
     )
 
 
@@ -50,6 +59,64 @@ def catalog(images, annotations):
 
 
 class AuditCatalogTest(unittest.TestCase):
+    def test_audit_rejects_non_integer_single_image_category_id(self):
+        for invalid_id in (True, 1.0):
+            with self.subTest(invalid_id=invalid_id):
+                record = image(
+                    key="Bread01/invalid-id.jpg",
+                    source_kind="single_bread",
+                    category_id=invalid_id,
+                    category_name="Walnut Donut",
+                )
+
+                report = audit_catalog(catalog([record], []))
+
+                self.assertEqual(
+                    {issue.code for issue in report.issues},
+                    {"single_image_category_mismatch"},
+                )
+
+    def test_audit_enforces_image_category_metadata_by_source_kind(self):
+        report = audit_catalog(
+            catalog(
+                [
+                    image(
+                        key="Bread01/valid.jpg",
+                        source_kind="single_bread",
+                        category_id=1,
+                        category_name="Walnut Donut",
+                    ),
+                    image(key="Bread01/missing.jpg", source_kind="single_bread"),
+                    image(
+                        key="Bread01/mismatch.jpg",
+                        source_kind="single_bread",
+                        category_id=1,
+                        category_name="Croffle",
+                    ),
+                    image(
+                        key="Bread01/unknown.jpg",
+                        source_kind="single_bread",
+                        category_id=99,
+                        category_name="Unknown",
+                    ),
+                    image(
+                        category_id=1,
+                        category_name="Walnut Donut",
+                    ),
+                ],
+                [],
+            )
+        )
+
+        self.assertEqual(
+            {issue.code for issue in report.issues},
+            {
+                "single_image_category_missing",
+                "single_image_category_mismatch",
+                "mixed_image_category_present",
+            },
+        )
+
     def test_audit_flags_out_of_bounds_and_exact_duplicates(self):
         duplicate = annotation(annotation_id="a2", bbox=(90.0, 70.0, 20.0, 20.0))
         report = audit_catalog(

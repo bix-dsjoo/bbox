@@ -1,7 +1,9 @@
+import json
 import tempfile
 import unittest
 from collections import Counter, defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -15,6 +17,8 @@ from tools.bread_training.split import (
     assign_folds,
     assign_single_product_folds,
     group_single_product_images,
+    load_catalog,
+    main,
 )
 
 
@@ -200,6 +204,114 @@ class FoldAssignmentTest(unittest.TestCase):
                 {"Test_20260714/E0501.jpg": 2},
                 [DerivedRecord("x", "Test_20260710/E9999.jpg", 1)],
             )
+
+    def test_partially_malformed_provenance_fails_closed(self):
+        assignments = {"Test_20260714/E0501.jpg": 2}
+        malformed_records = (
+            SimpleNamespace(output_key="x", source_key="", fold=1),
+            SimpleNamespace(
+                output_key="x",
+                source_key="Bread01/a.jpg",
+                source_keys=("Test_20260714/E0501.jpg", None),
+                fold=1,
+            ),
+            SimpleNamespace(
+                output_key="x",
+                source_key="Bread01/a.jpg",
+                source_keys=("",),
+                fold=1,
+            ),
+            SimpleNamespace(
+                output_key="x",
+                source_key="Bread01/a.jpg",
+                source_keys="Test_20260714/E0501.jpg",
+                fold=1,
+            ),
+            SimpleNamespace(
+                output_key="x",
+                source_key="Bread01/a.jpg",
+                background_key=" ",
+                fold=1,
+            ),
+        )
+
+        for record in malformed_records:
+            with self.subTest(record=record), self.assertRaises(LeakageError):
+                assert_no_mixed_scene_leakage(assignments, [record])
+
+
+class CatalogLoadingTest(unittest.TestCase):
+    def test_bbox_requires_four_number_json_array(self):
+        invalid_boxes = (
+            "0123",
+            {"0": 0, "1": 0, "2": 1, "3": 1},
+            [0, 0, 1],
+            [0, 0, True, 1],
+            ["0", 0, 1, 1],
+        )
+        for bbox in invalid_boxes:
+            with self.subTest(bbox=bbox), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "catalog.json"
+                payload = {
+                    "raw_root": "C:/raw",
+                    "labels": [{"id": 1, "name": "Walnut Donut"}],
+                    "images": [
+                        {
+                            "key": "Test_20260714/E0501.jpg",
+                            "absolute_path": "C:/raw/Test_20260714/E0501.jpg",
+                            "sha256": "a" * 64,
+                            "width": 100,
+                            "height": 80,
+                            "source_kind": "mixed_scene",
+                            "source_group": "Test_20260714",
+                            "category_id": None,
+                            "category_name": None,
+                        }
+                    ],
+                    "annotations": [
+                        {
+                            "annotation_id": "a1",
+                            "image_key": "Test_20260714/E0501.jpg",
+                            "category_id": 1,
+                            "category_name": "Walnut Donut",
+                            "bbox": bbox,
+                        }
+                    ],
+                }
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+                with self.assertRaises(SplitError):
+                    load_catalog(path)
+
+
+class OutputGuardTest(unittest.TestCase):
+    def test_cli_rejects_outputs_below_catalog_raw_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw_root = root / "raw"
+            raw_root.mkdir()
+            catalog = catalog_with_83_mixed_images()
+            payload = catalog.to_json()
+            payload["raw_root"] = str(raw_root)
+            catalog_path = root / "catalog.json"
+            catalog_path.write_text(json.dumps(payload), encoding="utf-8")
+            audit_output = raw_root / "outputs" / "audit.json"
+            split_output = raw_root / "datasets" / "split.json"
+
+            with self.assertRaises(SplitError):
+                main(
+                    [
+                        "--catalog",
+                        str(catalog_path),
+                        "--audit-output",
+                        str(audit_output),
+                        "--split-output",
+                        str(split_output),
+                    ]
+                )
+
+            self.assertFalse(audit_output.exists())
+            self.assertFalse(split_output.exists())
 
 
 class SingleProductGroupingTest(unittest.TestCase):
