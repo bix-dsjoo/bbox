@@ -22,6 +22,8 @@ manifest handoff is complete. Packaging must never include it once the v2
 detector has been published.
 
 Model weights are local runtime assets and intentionally ignored by source
-control. Run `python -m tools.bread_training.run_selection audit-handoff` with
-the manifest and an output path before packaging to recompute local hashes and
-validate labels, thresholds, quality settings, and verifier absence.
+control. Run
+`python tools/detectors/bread_pipeline_manifest.py models/bread_pipeline_manifest.json`
+before packaging to recompute local hashes and validate labels, thresholds,
+quality settings, and verifier absence. The selection workflow also writes its
+handoff audit beside `selection_report.json`.

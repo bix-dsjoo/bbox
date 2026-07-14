@@ -3,10 +3,10 @@
   "pipelineVersion": "bread-pipeline-v1",
   "policyVersion": "bread-label-policy-v2",
   "detector": {
-    "file": "bread_yolov8n_1class_tray_v0_2.pt",
-    "sha256": "e84163ef40dfa829bf37444980eebda2571645a1f1a048d9e35abbcbf6cdd0b1",
+    "file": "bread_detector_candidate_a2_tight_v2.pt",
+    "sha256": "c2290115bbe12f777c11f11940e46f75676ab0a94f92f388d883b3b3df193cbe",
     "imgsz": 640,
-    "confidence": 0.25,
+    "confidence": 0.55,
     "iou": 0.7
   },
   "classifier": {
