@@ -15,7 +15,7 @@ class UnsupportedProjectVersionException implements Exception {
 class ProjectStore {
   const ProjectStore._();
 
-  static const int currentSchemaVersion = 2;
+  static const int currentSchemaVersion = 3;
 
   static Future<AnnotationProject> save(
     AnnotationProject project,
@@ -41,12 +41,45 @@ class ProjectStore {
     final file = File(projectFilePath);
     final raw = await file.readAsString(encoding: utf8);
     final json = jsonDecode(raw) as Map<String, Object?>;
+    final migrated = _migrateToCurrent(json);
+    return AnnotationProject.fromJson(
+      migrated,
+    ).copyWith(projectFilePath: projectFilePath);
+  }
+
+  static Map<String, Object?> _migrateToCurrent(Map<String, Object?> json) {
     final version = json['schemaVersion'] as int? ?? 0;
-    if (version != currentSchemaVersion) {
+    if (version == currentSchemaVersion) {
+      return json;
+    }
+    if (version != 2) {
       throw UnsupportedProjectVersionException(version);
     }
-    return AnnotationProject.fromJson(
-      json,
-    ).copyWith(projectFilePath: projectFilePath);
+    final migrated = Map<String, Object?>.from(json)
+      ..['schemaVersion'] = currentSchemaVersion;
+    final images = migrated['images'] as List<Object?>? ?? const [];
+    migrated['images'] = [
+      for (final image in images.cast<Map<String, Object?>>())
+        _migrateImageV2(image),
+    ];
+    return migrated;
+  }
+
+  static Map<String, Object?> _migrateImageV2(Map<String, Object?> image) {
+    final migrated = Map<String, Object?>.from(image)..['contentSha256'] = null;
+    final boxes = migrated['boxes'] as List<Object?>? ?? const [];
+    migrated['boxes'] = [
+      for (final box in boxes.cast<Map<String, Object?>>()) _migrateBoxV2(box),
+    ];
+    return migrated;
+  }
+
+  static Map<String, Object?> _migrateBoxV2(Map<String, Object?> box) {
+    final migrated = Map<String, Object?>.from(box);
+    final isLabeled =
+        migrated['status'] == 'labeled' && migrated['labelId'] != null;
+    migrated['labelSource'] = isLabeled ? 'user' : null;
+    migrated['automation'] = null;
+    return migrated;
   }
 }

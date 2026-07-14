@@ -7,7 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('ProjectStore', () {
-    test('saves and loads schema 2 project state with source paths', () async {
+    test('saves and loads current project state with source paths', () async {
       final tempDir = await Directory.systemTemp.createTemp(
         'bbox_project_store_test',
       );
@@ -61,6 +61,7 @@ void main() {
       expect(loaded.images.single.importedFrom, r'C:\images\folder');
       expect(loaded.images.single.status, ImageStatus.confirmed);
       expect(loaded.images.single.boxes.single.labelId, 1);
+      expect(loaded.images.single.boxes.single.labelSource, isNull);
       expect(loaded.images.single.boxes.single.confidence, 0.8);
     });
 
