@@ -35,6 +35,7 @@ AP_CONFIDENCE_FLOOR = 0.001
 DEFAULT_THRESHOLD_CANDIDATES = tuple(value / 100 for value in range(5, 100, 5))
 DEFAULT_CLASSIFIER_INITIAL_WEIGHTS = Path("yolov8n-cls.pt")
 DETECTOR_CANDIDATE_EVALUATOR_VERSION = 2
+DETECTOR_CANDIDATE_TRAINER_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -1378,14 +1379,13 @@ def _best_epoch(run_root: Path) -> int:
         {str(key).strip(): str(value).strip() for key, value in row.items()}
         for row in rows
     ]
-    map50 = "metrics/mAP50(B)"
     map50_95 = "metrics/mAP50-95(B)"
-    if all(map50 in row and map50_95 in row for row in normalized):
+    if all(map50_95 in row for row in normalized):
         selected = max(
             normalized,
             key=lambda row: (
-                0.1 * float(row[map50]) + 0.9 * float(row[map50_95]),
-                -int(float(row["epoch"])),
+                float(row[map50_95]),
+                int(float(row["epoch"])),
             ),
         )
     else:
@@ -1395,6 +1395,44 @@ def _best_epoch(run_root: Path) -> int:
 
 def _detector_report_from_payload(payload: Mapping[str, Any]) -> DetectorReport:
     return DetectorReport(**{key: float(value) for key, value in payload.items()})
+
+
+def _ensure_candidate_initial_weights(path: Path) -> Path:
+    if path.is_file() and path.stat().st_size > 0:
+        return path
+    if path == Path("yolov8n.pt"):
+        _yolo_class()(str(path))
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise FileNotFoundError(f"Detector initial weights do not exist: {path}")
+    return path
+
+
+def _training_fingerprint(
+    config: DetectorCandidateConfig,
+    *,
+    initial_weights_sha256: str,
+    dataset_manifest_sha256: str,
+    dataset_yaml_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "trainer_schema_version": DETECTOR_CANDIDATE_TRAINER_SCHEMA_VERSION,
+        "evaluator_schema_version": DETECTOR_CANDIDATE_EVALUATOR_VERSION,
+        "candidate": config.name,
+        "initial_weights": str(config.initial_weights),
+        "initial_weights_sha256": initial_weights_sha256,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+        "dataset_yaml_sha256": dataset_yaml_sha256,
+        "imgsz": 640,
+        "device": config.device,
+        "seed": config.seed,
+        "deterministic": True,
+        "workers": 0,
+        "batch": config.batch,
+        "epochs": config.epochs,
+        "patience": config.patience,
+        "synthetic_ratio": config.synthetic_ratio,
+        "exist_ok": True,
+    }
 
 
 def run_detector_candidate_oof(
@@ -1411,6 +1449,8 @@ def run_detector_candidate_oof(
         raise ValueError("Detector candidate synthetic_ratio must be zero")
     if config.epochs <= 0 or config.patience < 0 or config.batch <= 0:
         raise ValueError("Detector candidate training settings are invalid")
+    initial_weights = _ensure_candidate_initial_weights(config.initial_weights)
+    initial_weights_hash = _sha256_file(initial_weights)
     fold_manifests = []
     heldout_keys: set[str] = set()
     for fold in range(5):
@@ -1431,34 +1471,47 @@ def run_detector_candidate_oof(
     latencies: list[float] = []
     for fold, (dataset_root, manifest) in enumerate(fold_manifests):
         manifest_path = dataset_root / "source_manifest.json"
+        dataset_yaml = dataset_root / "dataset.yaml"
+        if not dataset_yaml.is_file():
+            raise FileNotFoundError(f"Detector dataset YAML does not exist: {dataset_yaml}")
         manifest_hash = _sha256_file(manifest_path)
+        training_fingerprint = _training_fingerprint(
+            config,
+            initial_weights_sha256=initial_weights_hash,
+            dataset_manifest_sha256=manifest_hash,
+            dataset_yaml_sha256=_sha256_file(dataset_yaml),
+        )
         run_name = f"fold_{fold}"
         run_root = config.output_root / run_name
         weights = run_root / "weights" / "best.pt"
         completion_path = run_root / "candidate_training.json"
-        completion = {
-            "schema_version": 1,
-            "candidate": config.name,
-            "fold": fold,
-            "initial_weights": str(config.initial_weights),
-            "dataset_manifest_sha256": manifest_hash,
-            "seed": config.seed,
-            "epochs": config.epochs,
-            "patience": config.patience,
-            "batch": config.batch,
-            "device": config.device,
-            "synthetic_ratio": config.synthetic_ratio,
-        }
         reusable = False
         if weights.is_file() and completion_path.is_file():
-            reusable = json.loads(completion_path.read_text(encoding="utf-8")) == completion
+            try:
+                loaded_completion = json.loads(
+                    completion_path.read_text(encoding="utf-8")
+                )
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                loaded_completion = None
+            stored_completion = (
+                loaded_completion if isinstance(loaded_completion, dict) else {}
+            )
+            reusable = (
+                weights.stat().st_size > 0
+                and stored_completion.get("schema_version") == 2
+                and stored_completion.get("fold") == fold
+                and stored_completion.get("training_fingerprint")
+                == training_fingerprint
+                and stored_completion.get("best_weights_sha256")
+                == _sha256_file(weights)
+            )
         if not reusable:
             if progress:
                 progress(f"candidate={config.name} fold={fold} phase=train")
             weights = train_fold(
                 DetectorTrainConfig(
                     initial_weights=config.initial_weights,
-                    dataset_yaml=dataset_root / "dataset.yaml",
+                    dataset_yaml=dataset_yaml,
                     seed=config.seed,
                     output_root=config.output_root,
                     run_name=run_name,
@@ -1468,8 +1521,14 @@ def run_detector_candidate_oof(
                     device=config.device,
                 )
             )
-            if not weights.is_file():
+            if not weights.is_file() or weights.stat().st_size <= 0:
                 raise FileNotFoundError(f"Trained detector weights do not exist: {weights}")
+            completion = {
+                "schema_version": 2,
+                "fold": fold,
+                "training_fingerprint": training_fingerprint,
+                "best_weights_sha256": _sha256_file(weights),
+            }
             completion_path.parent.mkdir(parents=True, exist_ok=True)
             completion_path.write_text(
                 json.dumps(completion, indent=2, ensure_ascii=False) + "\n",
