@@ -8,7 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('reads a response split across arbitrary chunks', () async {
-    final jsonBytes = utf8.encode('{"version":1,"type":"ready"}');
+    final jsonBytes = utf8.encode('{"version":2,"type":"ready"}');
     final frame = BytesBuilder()
       ..add(uint32Bytes(jsonBytes.length))
       ..add(jsonBytes);
@@ -35,7 +35,7 @@ void main() {
     await writeWorkerRequest(
       sink,
       const {
-        'version': 1,
+        'version': 2,
         'type': 'detect',
         'requestId': '7',
         'fileName': '한글.png',
@@ -73,7 +73,7 @@ void main() {
   });
 
   test('rejects unsupported protocol version', () async {
-    final jsonBytes = utf8.encode('{"version":2,"type":"ready"}');
+    final jsonBytes = utf8.encode('{"version":1,"type":"ready"}');
     final frame = BytesBuilder()
       ..add(uint32Bytes(jsonBytes.length))
       ..add(jsonBytes);
@@ -93,10 +93,10 @@ void main() {
 
   for (final malformed in <String, List<int>>{
     'invalid utf8': const [0xC3, 0x28],
-    'invalid json': utf8.encode('{"version":1'),
+    'invalid json': utf8.encode('{"version":2'),
     'non-object top level': utf8.encode('[1,2,3]'),
     'wrong-type message field': utf8.encode(
-      '{"version":1,"type":{"unexpected":true}}',
+      '{"version":2,"type":{"unexpected":true}}',
     ),
   }.entries) {
     test('${malformed.key} is a worker protocol exception', () async {
@@ -134,7 +134,8 @@ void main() {
     );
   });
 
-  test('rejects payload larger than 512 MiB before writing', () async {
+  test('rejects payload larger than 64 MiB before writing', () async {
+    expect(maxWorkerImageBytes, 64 * 1024 * 1024);
     final chunks = <List<int>>[];
     final controller = StreamController<List<int>>();
     final subscription = controller.stream.listen(chunks.add);
@@ -145,7 +146,7 @@ void main() {
     try {
       await writeWorkerRequest(
         sink,
-        const {'version': 1, 'type': 'detect', 'requestId': '7'},
+        const {'version': 2, 'type': 'detect', 'requestId': '7'},
         maxWorkerImageBytes + 1,
         const Stream<List<int>>.empty(),
       );

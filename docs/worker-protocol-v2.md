@@ -13,7 +13,7 @@ Every request is one byte frame in this order:
 3. unsigned 64-bit big-endian payload length;
 4. that many opaque image bytes.
 
-The maximum header is 65,536 bytes and the maximum image payload is 512 MiB. An
+The maximum header is 65,536 bytes and the maximum image payload is 64 MiB. An
 EOF inside a declared field is fatal. A response is an unsigned 32-bit big-endian
 length followed by one UTF-8 JSON object, with a maximum encoded size of 1 MiB.
 Response JSON is compact, has lexicographically sorted object keys, and is encoded
@@ -24,6 +24,10 @@ frame before parsing or validating its header. A malformed or semantically inval
 header therefore does not leave the stream positioned inside that frame. A header
 or payload whose declared length exceeds its limit is fatal immediately because
 the frame cannot be trusted or buffered safely.
+
+The four-byte prefix is read exactly even when the input stream returns short
+chunks. Image payload bytes are filled into one preallocated `bytearray` so the
+worker does not create a second full-size payload copy.
 
 ## Ready message
 

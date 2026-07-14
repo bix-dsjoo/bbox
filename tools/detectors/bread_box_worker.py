@@ -32,7 +32,7 @@ except ModuleNotFoundError:  # Direct execution from tools/detectors.
 
 PROTOCOL_VERSION = 2
 MAX_HEADER_BYTES = 64 * 1024
-MAX_IMAGE_BYTES = 512 * 1024 * 1024
+MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 
 
@@ -50,20 +50,50 @@ def read_exact(stream, length):
     return bytes(chunks)
 
 
-def read_request(stream):
-    prefix = stream.read(4)
-    if prefix == b"":
+def read_prefix_exact(stream):
+    first = stream.read(1)
+    if first == b"":
         return None
-    if len(prefix) != 4:
-        raise EOFError("truncated request header length")
+    prefix = bytearray(first)
+    while len(prefix) < 4:
+        chunk = stream.read(4 - len(prefix))
+        if not chunk:
+            raise EOFError(f"expected 4 bytes, received {len(prefix)}")
+        prefix.extend(chunk)
+    return bytes(prefix)
+
+
+def read_payload_exact(stream, length):
+    payload = bytearray(length)
+    view = memoryview(payload)
+    offset = 0
+    readinto = getattr(stream, "readinto", None)
+    while offset < length:
+        if callable(readinto):
+            count = readinto(view[offset:])
+        else:
+            chunk = stream.read(min(length - offset, 1024 * 1024))
+            count = len(chunk) if chunk else 0
+            if count:
+                view[offset : offset + count] = chunk
+        if count is None or count <= 0:
+            raise EOFError(f"expected {length} bytes, received {offset}")
+        offset += count
+    return payload
+
+
+def read_request(stream):
+    prefix = read_prefix_exact(stream)
+    if prefix is None:
+        return None
     header_length = struct.unpack(">I", prefix)[0]
     if header_length > MAX_HEADER_BYTES:
         raise ValueError("request header exceeds 64 KiB")
     encoded_header = read_exact(stream, header_length)
     payload_length = struct.unpack(">Q", read_exact(stream, 8))[0]
     if payload_length > MAX_IMAGE_BYTES:
-        raise ValueError("image payload exceeds 512 MiB")
-    payload = read_exact(stream, payload_length)
+        raise ValueError("image payload exceeds 64 MiB")
+    payload = read_payload_exact(stream, payload_length)
     try:
         header = json.loads(
             encoded_header.decode("utf-8"),
@@ -832,6 +862,26 @@ def _iou(a, b):
     return 0.0 if union <= 0 else intersection / union
 
 
+def select_runtime(args, cv2, np, yolo_factory):
+    if args.pipeline_manifest:
+        engine = load_runtime_engine(
+            Path(args.pipeline_manifest), cv2, np, yolo_factory
+        )
+        return engine, ready_message(engine)
+    if args.detector_model:
+        detector_path = Path(args.detector_model)
+        if not detector_path.is_file():
+            raise FileNotFoundError(f"detector model does not exist: {detector_path}")
+        engine = BreadBoxEngine(args, cv2, np, yolo_factory)
+        return engine, {
+            "version": PROTOCOL_VERSION,
+            "type": "ready",
+            "detectorName": "bread-yolo-boxes",
+            "model": detector_path.name,
+        }
+    raise ValueError("--pipeline-manifest or --detector-model is required")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Persistent CPU bread detection and auto-label pipeline."
@@ -846,13 +896,7 @@ def main() -> int:
     parser.add_argument("--max-area-ratio", type=float, default=0.38)
     args = parser.parse_args()
 
-    if args.pipeline_manifest:
-        manifest_path = Path(args.pipeline_manifest)
-    elif args.detector_model:
-        manifest_path = Path(args.detector_model).with_name(
-            "bread_pipeline_manifest.json"
-        )
-    else:
+    if not args.pipeline_manifest and not args.detector_model:
         parser.error("--pipeline-manifest or --detector-model is required")
 
     try:
@@ -866,12 +910,12 @@ def main() -> int:
 
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            engine = load_runtime_engine(manifest_path, cv2, np, YOLO)
+            engine, ready = select_runtime(args, cv2, np, YOLO)
     except Exception as error:
-        print(f"Bread pipeline initialization failed: {error}", file=sys.stderr)
+        print(f"Bread worker initialization failed: {error}", file=sys.stderr)
         return 5
 
-    write_json_frame(sys.stdout.buffer, ready_message(engine))
+    write_json_frame(sys.stdout.buffer, ready)
     return serve(sys.stdin.buffer, sys.stdout.buffer, engine)
 
 

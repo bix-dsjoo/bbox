@@ -3,9 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-const workerProtocolVersion = 1;
+const workerProtocolVersion = 2;
 const maxWorkerHeaderBytes = 64 * 1024;
-const maxWorkerImageBytes = 512 * 1024 * 1024;
+const maxWorkerImageBytes = 64 * 1024 * 1024;
 const maxWorkerResponseBytes = 1024 * 1024;
 
 class WorkerProtocolException implements Exception {

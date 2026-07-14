@@ -4,6 +4,7 @@ import io
 import json
 import struct
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -257,6 +258,19 @@ def engine_args():
     )
 
 
+def runtime_args(*, detector_model=None, pipeline_manifest=None):
+    return types.SimpleNamespace(
+        detector_model=detector_model,
+        pipeline_manifest=pipeline_manifest,
+        imgsz=640,
+        det_conf=0.40,
+        iou=0.55,
+        max_results=50,
+        min_box_size=45,
+        max_area_ratio=0.38,
+    )
+
+
 class FakeEngine:
     def __init__(self, manifest=None):
         self.calls = []
@@ -302,6 +316,135 @@ class FakeEngine:
 
 
 class WorkerProtocolTest(unittest.TestCase):
+    def test_prefix_is_exact_read_from_byte_at_a_time_stream(self):
+        class ByteAtATime(io.BytesIO):
+            def read(self, size=-1):
+                return super().read(1 if size and size > 0 else size)
+
+        stream = ByteAtATime(
+            request_frame("first", b"one") + request_frame("second", b"two")
+        )
+
+        first_header, first_payload = worker.read_request(stream)
+        second_header, second_payload = worker.read_request(stream)
+
+        self.assertEqual((first_header["requestId"], first_payload), ("first", b"one"))
+        self.assertEqual(
+            (second_header["requestId"], second_payload), ("second", b"two")
+        )
+        self.assertIsNone(worker.read_request(stream))
+
+    def test_partial_prefix_eof_is_fatal_but_clean_eof_is_not(self):
+        self.assertIsNone(worker.read_request(io.BytesIO()))
+        with self.assertRaisesRegex(EOFError, "expected 4 bytes, received 2"):
+            worker.read_request(io.BytesIO(b"\x00\x01"))
+
+    def test_payload_limit_is_sixty_four_mib(self):
+        self.assertEqual(worker.MAX_IMAGE_BYTES, 64 * 1024 * 1024)
+        frame = (
+            struct.pack(">I", 2)
+            + b"{}"
+            + struct.pack(">Q", worker.MAX_IMAGE_BYTES + 1)
+        )
+        with self.assertRaisesRegex(ValueError, "64 MiB"):
+            worker.read_request(io.BytesIO(frame))
+
+    def test_payload_reader_uses_one_preallocated_buffer(self):
+        class ReadIntoOnly:
+            def __init__(self, payload):
+                self.payload = payload
+                self.offset = 0
+                self.buffers = []
+
+            def readinto(self, target):
+                self.buffers.append(target.obj)
+                if self.offset >= len(self.payload):
+                    return 0
+                count = min(len(target), 3)
+                target[:count] = self.payload[self.offset : self.offset + count]
+                self.offset += count
+                return count
+
+            def read(self, _size=-1):
+                raise AssertionError("payload reader made an allocating read")
+
+        stream = ReadIntoOnly(b"payload")
+        payload = worker.read_payload_exact(stream, 7)
+
+        self.assertIsInstance(payload, bytearray)
+        self.assertEqual(payload, b"payload")
+        self.assertTrue(stream.buffers)
+        self.assertTrue(all(item is payload for item in stream.buffers))
+
+    def test_explicit_pipeline_manifest_selects_pipeline_even_with_different_detector(self):
+        args = runtime_args(
+            pipeline_manifest=r"C:\models\selected.json",
+            detector_model=r"D:\legacy\different.pt",
+        )
+        expected = FakeEngine()
+        with mock.patch.object(
+            worker, "load_runtime_engine", return_value=expected
+        ) as pipeline_loader, mock.patch.object(
+            worker, "BreadBoxEngine"
+        ) as legacy_engine:
+            engine, ready = worker.select_runtime(args, cv2, np, object())
+
+        self.assertIs(engine, expected)
+        pipeline_loader.assert_called_once_with(
+            Path(r"C:\models\selected.json"), cv2, np, mock.ANY
+        )
+        legacy_engine.assert_not_called()
+        self.assertEqual(ready, worker.ready_message(expected))
+
+    def test_legacy_detector_uses_exact_requested_model_without_loading_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            detector_path = Path(directory) / "requested.pt"
+            detector_path.write_bytes(b"weights")
+            (Path(directory) / "bread_pipeline_manifest.json").write_text(
+                "different pipeline", encoding="utf-8"
+            )
+            calls = []
+            args = runtime_args(detector_model=str(detector_path))
+
+            with mock.patch.object(
+                worker,
+                "load_runtime_engine",
+                side_effect=AssertionError("legacy path loaded a manifest"),
+            ):
+                engine, ready = worker.select_runtime(
+                    args,
+                    cv2,
+                    np,
+                    lambda path: calls.append(path) or FakeDetector(),
+                )
+
+        self.assertIsInstance(engine, worker.BreadBoxEngine)
+        self.assertEqual(calls, [str(detector_path)])
+        self.assertEqual(
+            ready,
+            {
+                "version": 2,
+                "type": "ready",
+                "detectorName": "bread-yolo-boxes",
+                "model": "requested.pt",
+            },
+        )
+
+    def test_legacy_detector_missing_path_fails_before_model_factory(self):
+        calls = []
+        missing = str(Path(tempfile.gettempdir()) / "bbox-missing-detector.pt")
+        self.assertFalse(Path(missing).exists())
+
+        with self.assertRaisesRegex(FileNotFoundError, "detector model"):
+            worker.select_runtime(
+                runtime_args(detector_model=missing),
+                cv2,
+                np,
+                lambda path: calls.append(path),
+            )
+
+        self.assertEqual(calls, [])
+
     def test_runtime_engine_is_loaded_from_validated_manifest(self):
         manifest = pipeline_manifest()
         resolved = types.SimpleNamespace(
