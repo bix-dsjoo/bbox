@@ -442,7 +442,7 @@ def _pipeline_detection_boxes(result, *, image_width, image_height):
             malformed = True
             continue
         raw_confidence = confidences[index]
-        if not _is_finite_builtin_number(raw_confidence):
+        if not _is_probability(raw_confidence):
             malformed = True
             continue
         values = tuple(float(value) for value in row)
@@ -489,6 +489,13 @@ def _is_finite_builtin_number(value):
         return False
 
 
+def _is_probability(value):
+    if not _is_finite_builtin_number(value):
+        return False
+    number = float(value)
+    return 0.0 <= number <= 1.0
+
+
 def _supplied_pipeline_box(item, *, image_width, image_height):
     try:
         values = (
@@ -513,7 +520,7 @@ def _supplied_pipeline_box(item, *, image_width, image_height):
 
 
 def _optional_confidence(value):
-    return float(value) if _is_finite_builtin_number(value) else None
+    return float(value) if _is_probability(value) else None
 
 
 def _finite_number(value):

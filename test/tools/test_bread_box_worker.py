@@ -618,6 +618,28 @@ class BreadInferenceEngineTest(unittest.TestCase):
         self.assertEqual(result["boxes"][0]["confidence"], 0.9)
         self.assertEqual(result["stageErrors"][0]["stage"], "detector")
 
+    def test_detector_confidence_requires_probability_and_accepts_boundaries(self):
+        engine = pipeline_engine(
+            RawDetector(
+                [
+                    (2, 3, 10, 12),
+                    (12, 3, 20, 12),
+                    (22, 3, 30, 12),
+                    (32, 3, 40, 12),
+                    (42, 3, 50, 12),
+                    (52, 3, 60, 12),
+                    (62, 3, 70, 12),
+                ],
+                [0.0, 1.0, -1e-9, -1.0, 1.000000001, 2.0, 1e100],
+            ),
+            BatchClassifier([(0.95, 0.03, 0.02), (0.95, 0.03, 0.02)]),
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual([item["confidence"] for item in result["boxes"]], [0.0, 1.0])
+        self.assertEqual(result["stageErrors"][0]["stage"], "detector")
+
     def test_request_bytes_are_hashed(self):
         payload = pipeline_png_bytes()
         engine = pipeline_engine(PipelineDetector([]), BatchClassifier([]))
@@ -684,6 +706,48 @@ class BreadInferenceEngineTest(unittest.TestCase):
         )
 
         self.assertEqual(result["boxes"][0]["confidence"], 0.75)
+
+    def test_manual_confidence_requires_probability_and_accepts_boundaries(self):
+        invalid = (-1e-9, -1.0, 1.000000001, 2.0, 1e100)
+        for confidence in invalid:
+            with self.subTest(invalid=confidence):
+                engine = pipeline_engine(
+                    PipelineDetector([]), BatchClassifier([(0.95, 0.03, 0.02)])
+                )
+                result = engine.classify_bytes(
+                    pipeline_png_bytes(),
+                    [
+                        {
+                            "id": "manual",
+                            "x": 2,
+                            "y": 3,
+                            "width": 10,
+                            "height": 11,
+                            "confidence": confidence,
+                        }
+                    ],
+                )
+                self.assertIsNone(result["boxes"][0]["confidence"])
+
+        for confidence in (0.0, 1.0):
+            with self.subTest(boundary=confidence):
+                engine = pipeline_engine(
+                    PipelineDetector([]), BatchClassifier([(0.95, 0.03, 0.02)])
+                )
+                result = engine.classify_bytes(
+                    pipeline_png_bytes(),
+                    [
+                        {
+                            "id": "manual",
+                            "x": 2,
+                            "y": 3,
+                            "width": 10,
+                            "height": 11,
+                            "confidence": confidence,
+                        }
+                    ],
+                )
+                self.assertEqual(result["boxes"][0]["confidence"], confidence)
 
     def test_duplicate_reason_is_applied_to_survivors_after_nms(self):
         engine = pipeline_engine(
