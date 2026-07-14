@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -59,6 +58,8 @@ class CatalogImage:
     height: int
     source_kind: str
     source_group: str
+    category_id: int | None = None
+    category_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,9 +76,11 @@ class Catalog:
     labels: tuple[tuple[int, str], ...]
     images: tuple[CatalogImage, ...]
     annotations: tuple[CatalogAnnotation, ...]
+    raw_root: str
 
     def to_json(self) -> dict[str, Any]:
         return {
+            "raw_root": self.raw_root,
             "labels": [
                 {"id": category_id, "name": name}
                 for category_id, name in self.labels
@@ -104,6 +107,12 @@ def mixed_coco_path(raw_root: Path, directory: Path) -> Path:
 
 def canonical_image_key(raw_root: Path, path: Path) -> str:
     return path.relative_to(raw_root).as_posix()
+
+
+def _require_json_integer(value: Any, field_name: str) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{field_name} must be a JSON integer")
+    return value
 
 
 def _read_labels_registry(raw_root: Path) -> tuple[tuple[int, str], ...]:
@@ -160,7 +169,13 @@ def _decoded_dimensions(path: Path) -> tuple[int, int]:
 
 
 def _catalog_image(
-    raw_root: Path, path: Path, *, source_kind: str, source_group: str
+    raw_root: Path,
+    path: Path,
+    *,
+    source_kind: str,
+    source_group: str,
+    category_id: int | None = None,
+    category_name: str | None = None,
 ) -> CatalogImage:
     width, height = _decoded_dimensions(path)
     return CatalogImage(
@@ -171,6 +186,8 @@ def _catalog_image(
         height=height,
         source_kind=source_kind,
         source_group=source_group,
+        category_id=category_id,
+        category_name=category_name,
     )
 
 
@@ -195,18 +212,17 @@ def _normalized_categories(payload: dict[str, Any]) -> tuple[tuple[int, str], ..
     if not isinstance(categories, list):
         raise ValueError("COCO category registry must be a list")
 
-    try:
-        registry = tuple(
-            sorted(
-                (
-                    int(category["id"]),
-                    normalize_category_name(str(category["name"])),
-                )
-                for category in categories
-            )
+    normalized: list[tuple[int, str]] = []
+    for category in categories:
+        try:
+            raw_category_id = category["id"]
+            category_name = normalize_category_name(str(category["name"]))
+        except (KeyError, TypeError) as error:
+            raise ValueError("Invalid COCO category registry") from error
+        normalized.append(
+            (_require_json_integer(raw_category_id, "COCO category id"), category_name)
         )
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError("Invalid COCO category registry") from error
+    registry = tuple(sorted(normalized))
 
     if registry != CANONICAL_LABELS:
         raise ValueError("COCO category registry does not match the canonical registry")
@@ -248,10 +264,11 @@ def _mixed_records(
     declared_names: set[str] = set()
     for raw_image in raw_images:
         try:
-            image_id = int(raw_image["id"])
+            raw_image_id = raw_image["id"]
             file_name = str(raw_image["file_name"])
-        except (KeyError, TypeError, ValueError) as error:
+        except (KeyError, TypeError) as error:
             raise ValueError(f"Invalid COCO image record in {coco_path}") from error
+        image_id = _require_json_integer(raw_image_id, "COCO image id")
         if image_id in image_keys_by_id:
             raise ValueError(f"Duplicate COCO image id in {coco_path}: {image_id}")
 
@@ -286,16 +303,24 @@ def _mixed_records(
     canonical_names = dict(CANONICAL_LABELS)
     for raw_annotation in raw_annotations:
         try:
-            raw_annotation_id = str(raw_annotation["id"])
-            annotation_id = f"{directory.name}:{raw_annotation_id}"
-            image_id = int(raw_annotation["image_id"])
-            category_id = int(raw_annotation["category_id"])
+            raw_annotation_id = raw_annotation["id"]
+            raw_image_id = raw_annotation["image_id"]
+            raw_category_id = raw_annotation["category_id"]
             raw_bbox = raw_annotation["bbox"]
             if not isinstance(raw_bbox, list) or len(raw_bbox) != 4:
                 raise ValueError("bbox must contain four values")
             bbox = tuple(float(value) for value in raw_bbox)
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"Invalid COCO annotation in {coco_path}") from error
+
+        annotation_id_value = _require_json_integer(
+            raw_annotation_id, "COCO annotation id"
+        )
+        image_id = _require_json_integer(raw_image_id, "COCO annotation image_id")
+        category_id = _require_json_integer(
+            raw_category_id, "COCO annotation category_id"
+        )
+        annotation_id = f"{directory.name}:{annotation_id_value}"
 
         if annotation_id in seen_annotation_ids:
             raise ValueError(f"Duplicate COCO annotation id: {annotation_id}")
@@ -328,6 +353,7 @@ def build_catalog(raw_root: Path) -> Catalog:
 
     images: list[CatalogImage] = []
     annotations: list[CatalogAnnotation] = []
+    canonical_names = dict(labels)
     for category_id in range(1, 21):
         directory = _require_directory(raw_root, f"Bread{category_id:02d}")
         images.extend(
@@ -336,6 +362,8 @@ def build_catalog(raw_root: Path) -> Catalog:
                 image_path,
                 source_kind="single_bread",
                 source_group=directory.name,
+                category_id=category_id,
+                category_name=canonical_names[category_id],
             )
             for image_path in _supported_image_paths(directory)
         )
@@ -350,26 +378,19 @@ def build_catalog(raw_root: Path) -> Catalog:
         labels=labels,
         images=tuple(sorted(images, key=lambda image: image.key.casefold())),
         annotations=tuple(annotations),
+        raw_root=str(raw_root),
     )
-
-
-def _catalog_raw_root(catalog: Catalog) -> Path | None:
-    if not catalog.images:
-        return None
-    common_path = os.path.commonpath([image.absolute_path for image in catalog.images])
-    return Path(common_path)
 
 
 def write_catalog(catalog: Catalog, path: Path) -> None:
     output_path = path.resolve()
-    raw_root = _catalog_raw_root(catalog)
-    if raw_root is not None:
-        try:
-            output_path.relative_to(raw_root.resolve())
-        except ValueError:
-            pass
-        else:
-            raise ValueError(f"Refusing to write catalog under raw root: {output_path}")
+    raw_root = Path(catalog.raw_root).resolve()
+    try:
+        output_path.relative_to(raw_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(f"Refusing to write catalog under raw root: {output_path}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(

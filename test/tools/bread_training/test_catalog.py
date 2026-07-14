@@ -1,3 +1,4 @@
+import copy
 import json
 import tempfile
 import unittest
@@ -89,6 +90,31 @@ class CatalogTest(unittest.TestCase):
             json.dumps(payload), encoding="utf-8"
         )
 
+    def _assert_malformed_coco_payload_rejected(self, payload):
+        json_path = self.fixture_root / "Test_20260714" / "Test_20260714.json"
+        json_path.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "JSON integer"):
+            build_catalog(self.fixture_root)
+
+    def _empty_all_source_directories(self):
+        for directory in self.fixture_root.glob("Bread[0-9][0-9]"):
+            for image_path in directory.iterdir():
+                image_path.unlink()
+        for directory_name in (
+            "Test_20260706",
+            "Test_20260708",
+            "Test_20260710",
+            "Test_20260714",
+        ):
+            directory = self.fixture_root / directory_name
+            for image_path in directory.glob("*.jpg"):
+                image_path.unlink()
+            json_path = directory / f"{directory_name}.json"
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            payload["images"] = []
+            payload["annotations"] = []
+            json_path.write_text(json.dumps(payload), encoding="utf-8")
+
     def test_normalizes_grain_campagne_alias(self):
         self.assertEqual(normalize_category_name("Grain  Campagne"), "Grain Campagne")
 
@@ -115,6 +141,28 @@ class CatalogTest(unittest.TestCase):
             write_catalog(catalog, self.fixture_root / "catalog.json")
 
         self.assertFalse((self.fixture_root / "catalog.json").exists())
+
+    def test_catalog_retains_resolved_raw_root(self):
+        catalog = build_catalog(self.fixture_root)
+
+        self.assertEqual(
+            getattr(catalog, "raw_root", None), str(self.fixture_root.resolve())
+        )
+
+    def test_catalog_json_includes_resolved_raw_root(self):
+        payload = build_catalog(self.fixture_root).to_json()
+
+        self.assertEqual(payload.get("raw_root"), str(self.fixture_root.resolve()))
+
+    def test_empty_catalog_rejects_output_under_raw_root(self):
+        self._empty_all_source_directories()
+        catalog = build_catalog(self.fixture_root)
+        output = self.fixture_root / "catalog.json"
+
+        self.assertEqual(catalog.images, ())
+        with self.assertRaisesRegex(ValueError, "raw root"):
+            write_catalog(catalog, output)
+        self.assertFalse(output.exists())
 
     def test_catalog_uses_canonical_labels_and_namespaced_annotation_ids(self):
         catalog = build_catalog(self.fixture_root)
@@ -144,6 +192,39 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(len(image.sha256), 64)
         with self.assertRaises(FrozenInstanceError):
             image.width = 99
+
+    def test_catalog_image_category_metadata_matches_source_kind(self):
+        catalog = build_catalog(self.fixture_root)
+        bread01 = next(image for image in catalog.images if image.source_group == "Bread01")
+        bread20 = next(image for image in catalog.images if image.source_group == "Bread20")
+        mixed = next(image for image in catalog.images if image.source_kind == "mixed_scene")
+
+        self.assertEqual(
+            (getattr(bread01, "category_id", None), getattr(bread01, "category_name", None)),
+            (1, "Walnut Donut"),
+        )
+        self.assertEqual(
+            (getattr(bread20, "category_id", None), getattr(bread20, "category_name", None)),
+            (20, "Plain Bread"),
+        )
+        self.assertEqual(
+            (getattr(mixed, "category_id", "missing"), getattr(mixed, "category_name", "missing")),
+            (None, None),
+        )
+
+    def test_catalog_json_includes_image_category_metadata(self):
+        images = build_catalog(self.fixture_root).to_json()["images"]
+        bread01 = next(image for image in images if image["source_group"] == "Bread01")
+        mixed = next(image for image in images if image["source_kind"] == "mixed_scene")
+
+        self.assertEqual(
+            (bread01.get("category_id"), bread01.get("category_name")),
+            (1, "Walnut Donut"),
+        )
+        self.assertIn("category_id", mixed)
+        self.assertIn("category_name", mixed)
+        self.assertIsNone(mixed["category_id"])
+        self.assertIsNone(mixed["category_name"])
 
     def test_catalog_dimensions_respect_exif_orientation(self):
         directory = self.fixture_root / "Test_20260714"
@@ -185,6 +266,37 @@ class CatalogTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "category registry"):
             build_catalog(self.fixture_root)
+
+    def test_rejects_noninteger_coco_category_registry_ids(self):
+        json_path = self.fixture_root / "Test_20260714" / "Test_20260714.json"
+        original = json.loads(json_path.read_text(encoding="utf-8"))
+
+        for invalid_id in (1.5, True, "1"):
+            with self.subTest(invalid_id=invalid_id):
+                payload = copy.deepcopy(original)
+                payload["categories"][0]["id"] = invalid_id
+                self._assert_malformed_coco_payload_rejected(payload)
+
+    def test_rejects_noninteger_coco_image_ids(self):
+        json_path = self.fixture_root / "Test_20260714" / "Test_20260714.json"
+        original = json.loads(json_path.read_text(encoding="utf-8"))
+
+        for invalid_id in (1.5, True, "1"):
+            with self.subTest(invalid_id=invalid_id):
+                payload = copy.deepcopy(original)
+                payload["images"][0]["id"] = invalid_id
+                self._assert_malformed_coco_payload_rejected(payload)
+
+    def test_rejects_noninteger_coco_annotation_ids_and_references(self):
+        json_path = self.fixture_root / "Test_20260714" / "Test_20260714.json"
+        original = json.loads(json_path.read_text(encoding="utf-8"))
+
+        for field_name in ("id", "image_id", "category_id"):
+            for invalid_id in (1.5, True, "1"):
+                with self.subTest(field_name=field_name, invalid_id=invalid_id):
+                    payload = copy.deepcopy(original)
+                    payload["annotations"][0][field_name] = invalid_id
+                    self._assert_malformed_coco_payload_rejected(payload)
 
     def test_rejects_missing_bread_folder(self):
         directory = self.fixture_root / "Bread20"
