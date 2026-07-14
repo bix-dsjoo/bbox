@@ -12,6 +12,7 @@ from tools.bread_training.train import (
     _best_epoch,
     _load_candidate_ground_truth,
     detector_candidate_matrix,
+    fast_detector_candidate_matrix,
     run_detector_candidate_oof,
 )
 
@@ -48,6 +49,87 @@ def _write_fold(root: Path, fold: int) -> None:
 
 
 class DetectorCandidateTest(unittest.TestCase):
+    def test_fast_candidate_matrix_has_fixed_real_only_profiles(self):
+        a2, b2 = fast_detector_candidate_matrix(
+            Path("models/current.pt"),
+            Path("datasets/folds"),
+            Path("outputs/fast"),
+        )
+
+        self.assertEqual(
+            (a2.name, b2.name),
+            ("candidate_a2_tight", "candidate_b2_recall"),
+        )
+        self.assertEqual(a2.initial_weights, Path("models/current.pt"))
+        self.assertEqual(b2.initial_weights, Path("yolov8n.pt"))
+        self.assertEqual(a2.folds, (0,))
+        self.assertEqual(b2.folds, (0,))
+        self.assertEqual((a2.epochs, a2.patience), (12, 4))
+        self.assertEqual((b2.epochs, b2.patience), (12, 4))
+        self.assertEqual(
+            (a2.mosaic, a2.close_mosaic, a2.translate, a2.scale),
+            (0.25, 6, 0.05, 0.20),
+        )
+        self.assertEqual(
+            (b2.mosaic, b2.close_mosaic, b2.translate, b2.scale),
+            (0.50, 8, 0.10, 0.30),
+        )
+        self.assertTrue(all(item.synthetic_ratio == 0.0 for item in (a2, b2)))
+
+    def test_candidate_runner_trains_only_requested_folds(self):
+        train_calls = []
+
+        def train_fold(config):
+            train_calls.append(config.run_name)
+            weights = config.output_root / config.run_name / "weights" / "best.pt"
+            weights.parent.mkdir(parents=True, exist_ok=True)
+            weights.write_bytes(config.run_name.encode("ascii"))
+            (weights.parents[1] / "results.csv").write_text(
+                "epoch\n1\n", encoding="utf-8"
+            )
+            return weights
+
+        class FakePredictor:
+            def __init__(self, weights, paths_by_key, device=0):
+                pass
+
+            def __call__(self, image_keys, confidence):
+                return {
+                    key: (Prediction((0, 0, 10, 10), 0.9),) for key in image_keys
+                }
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            datasets = root / "datasets"
+            for fold in (0, 3):
+                _write_fold(datasets, fold)
+            initial = root / "initial.pt"
+            initial.write_bytes(b"initial")
+            config = DetectorCandidateConfig(
+                name="candidate",
+                initial_weights=initial,
+                fold_dataset_root=datasets,
+                output_root=root / "outputs",
+                folds=(0, 3),
+                epochs=1,
+            )
+
+            report = run_detector_candidate_oof(
+                config,
+                train_fold=train_fold,
+                predictor_factory=FakePredictor,
+                ground_truth_loader=lambda dataset, split: {
+                    f"fold-{dataset.name[-1]}-{split}.jpg": ((0, 0, 10, 10),)
+                },
+                progress=None,
+            )
+
+        self.assertEqual(train_calls, ["fold_0", "fold_3"])
+        self.assertEqual(
+            [item["fold"] for item in report.fold_artifacts],
+            [0, 3],
+        )
+
     def test_ground_truth_uses_exif_oriented_image_dimensions(self):
         from PIL import Image
 
@@ -151,6 +233,11 @@ class DetectorCandidateTest(unittest.TestCase):
                         "candidate",
                         "evaluator_schema_version",
                         "trainer_schema_version",
+                        "folds",
+                        "mosaic",
+                        "close_mosaic",
+                        "translate",
+                        "scale",
                     )
                 },
                 {
@@ -167,6 +254,11 @@ class DetectorCandidateTest(unittest.TestCase):
                     "candidate": "candidate",
                     "evaluator_schema_version": 2,
                     "trainer_schema_version": 2,
+                    "folds": [0, 1, 2, 3, 4],
+                    "mosaic": 1.0,
+                    "close_mosaic": 10,
+                    "translate": 0.1,
+                    "scale": 0.5,
                 },
             )
 

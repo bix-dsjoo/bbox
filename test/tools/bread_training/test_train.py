@@ -106,6 +106,10 @@ class DetectorTrainingTest(unittest.TestCase):
                     "project": str(config.output_root),
                     "name": "fold-2",
                     "exist_ok": True,
+                    "mosaic": 1.0,
+                    "close_mosaic": 10,
+                    "translate": 0.1,
+                    "scale": 0.5,
                 },
             ),
         )

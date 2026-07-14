@@ -49,6 +49,10 @@ class DetectorTrainConfig:
     patience: int = 20
     batch: int = 16
     device: int | str = 0
+    mosaic: float = 1.0
+    close_mosaic: int = 10
+    translate: float = 0.1
+    scale: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,11 @@ class DetectorCandidateConfig:
     batch: int = 16
     device: int | str = 0
     synthetic_ratio: float = 0.0
+    folds: tuple[int, ...] = (0, 1, 2, 3, 4)
+    mosaic: float = 1.0
+    close_mosaic: int = 10
+    translate: float = 0.1
+    scale: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,39 @@ def detector_candidate_matrix(
             initial_weights=Path("yolov8n.pt"),
             fold_dataset_root=fold_dataset_root,
             output_root=output_root / "coco_yolov8n_real",
+        ),
+    )
+
+
+def fast_detector_candidate_matrix(
+    current_weights: Path, fold_dataset_root: Path, output_root: Path
+) -> tuple[DetectorCandidateConfig, DetectorCandidateConfig]:
+    common = {
+        "fold_dataset_root": fold_dataset_root,
+        "folds": (0,),
+        "epochs": 12,
+        "patience": 4,
+    }
+    return (
+        DetectorCandidateConfig(
+            name="candidate_a2_tight",
+            initial_weights=current_weights,
+            output_root=output_root / "candidate_a2_tight",
+            mosaic=0.25,
+            close_mosaic=6,
+            translate=0.05,
+            scale=0.20,
+            **common,
+        ),
+        DetectorCandidateConfig(
+            name="candidate_b2_recall",
+            initial_weights=Path("yolov8n.pt"),
+            output_root=output_root / "candidate_b2_recall",
+            mosaic=0.50,
+            close_mosaic=8,
+            translate=0.10,
+            scale=0.30,
+            **common,
         ),
     )
 
@@ -223,6 +265,10 @@ def train_detector_fold(
         project=str(config.output_root),
         name=config.run_name,
         exist_ok=True,
+        mosaic=config.mosaic,
+        close_mosaic=config.close_mosaic,
+        translate=config.translate,
+        scale=config.scale,
     )
     return Path(result.save_dir) / "weights" / "best.pt"
 
@@ -1431,6 +1477,11 @@ def _training_fingerprint(
         "epochs": config.epochs,
         "patience": config.patience,
         "synthetic_ratio": config.synthetic_ratio,
+        "folds": list(config.folds),
+        "mosaic": config.mosaic,
+        "close_mosaic": config.close_mosaic,
+        "translate": config.translate,
+        "scale": config.scale,
         "exist_ok": True,
     }
 
@@ -1449,11 +1500,17 @@ def run_detector_candidate_oof(
         raise ValueError("Detector candidate synthetic_ratio must be zero")
     if config.epochs <= 0 or config.patience < 0 or config.batch <= 0:
         raise ValueError("Detector candidate training settings are invalid")
+    if (
+        not config.folds
+        or any(type(fold) is not int or fold not in range(5) for fold in config.folds)
+        or len(set(config.folds)) != len(config.folds)
+    ):
+        raise ValueError("Detector candidate folds must be unique integers from 0 to 4")
     initial_weights = _ensure_candidate_initial_weights(config.initial_weights)
     initial_weights_hash = _sha256_file(initial_weights)
     fold_manifests = []
     heldout_keys: set[str] = set()
-    for fold in range(5):
+    for fold in config.folds:
         dataset_root = config.fold_dataset_root / f"fold_{fold}"
         manifest = _candidate_fold_manifest(dataset_root, fold)
         current_keys = {
@@ -1462,14 +1519,14 @@ def run_detector_candidate_oof(
         if heldout_keys & current_keys:
             raise ValueError("Detector held-out images must be unique across folds")
         heldout_keys.update(current_keys)
-        fold_manifests.append((dataset_root, manifest))
+        fold_manifests.append((fold, dataset_root, manifest))
 
     config.output_root.mkdir(parents=True, exist_ok=True)
     fold_payloads: list[dict[str, Any]] = []
     fold_reports: list[DetectorReport] = []
     best_epochs: list[int] = []
     latencies: list[float] = []
-    for fold, (dataset_root, manifest) in enumerate(fold_manifests):
+    for fold, dataset_root, manifest in fold_manifests:
         manifest_path = dataset_root / "source_manifest.json"
         dataset_yaml = dataset_root / "dataset.yaml"
         if not dataset_yaml.is_file():
@@ -1519,6 +1576,10 @@ def run_detector_candidate_oof(
                     patience=config.patience,
                     batch=config.batch,
                     device=config.device,
+                    mosaic=config.mosaic,
+                    close_mosaic=config.close_mosaic,
+                    translate=config.translate,
+                    scale=config.scale,
                 )
             )
             if not weights.is_file() or weights.stat().st_size <= 0:
@@ -1612,13 +1673,13 @@ def run_detector_candidate_oof(
         "best_epochs": best_epochs,
         "folds": [
             {
-                "fold": fold,
+                "fold": int(payload["fold"]),
                 "metrics": payload["metrics"],
                 "confidence_threshold": payload["confidence_threshold"],
                 "model_sha256": payload["model_sha256"],
                 "dataset_manifest_sha256": payload["dataset_manifest_sha256"],
             }
-            for fold, payload in enumerate(fold_payloads)
+            for payload in fold_payloads
         ],
         "metrics": asdict(aggregate),
         "median_latency_ms": median_latency,
