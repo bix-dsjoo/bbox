@@ -149,7 +149,10 @@ def _validated_detector_records(catalog: Mapping[str, Any]):
         ):
             raise ValueError(f"invalid image dimensions for {key}")
         sha256 = item.get("sha256")
-        if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-fA-F]{64}", sha256) is None:
+        if (
+            not isinstance(sha256, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", sha256) is None
+        ):
             raise ValueError(f"invalid image sha256 for {key}")
         actual_sha256 = _source_sha256(source)
         if actual_sha256 != sha256.lower():
@@ -210,7 +213,9 @@ def _validated_assignments(
             or type(fold) is not int
             or fold not in range(FOLD_COUNT)
         ):
-            raise ValueError("mixed assignments require string keys and folds 0 through 4")
+            raise ValueError(
+                "mixed assignments require string keys and folds 0 through 4"
+            )
         assignments[key] = fold
     if set(assignments) != image_keys:
         raise ValueError("catalog mixed image keys and split assignments must match")
@@ -219,12 +224,9 @@ def _validated_assignments(
     return assignments
 
 
-def _link_or_copy(source: Path, destination: Path) -> None:
+def _copy_source(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.link(source, destination)
-    except OSError:
-        shutil.copy2(source, destination)
+    shutil.copy2(source, destination)
 
 
 def _safe_dataset_path(dataset_root: Path, *parts: object) -> Path:
@@ -271,7 +273,7 @@ def _materialize_split(
         destination = _safe_dataset_path(
             dataset_root, "images", image_directory, relative
         )
-        _link_or_copy(source, destination)
+        _copy_source(source, destination)
         label_path = _safe_dataset_path(
             dataset_root, "labels", image_directory, relative.with_suffix(".txt")
         )
@@ -304,29 +306,152 @@ def _materialize_split(
     return source_records
 
 
+def _validate_generated_destination(destination: Path, dataset_kind: str) -> None:
+    if destination.is_symlink() or not destination.is_dir():
+        raise ValueError(
+            f"detector dataset destination is not a directory: {destination}"
+        )
+    manifest_path = destination / "source_manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"destination is not a generated detector dataset: {destination}"
+        ) from error
+    recorded_kind = manifest.get("dataset_kind")
+    legacy_matches = (
+        dataset_kind == "fold" and type(manifest.get("heldout_fold")) is int
+    ) or (dataset_kind == "all_data" and manifest.get("all_data") is True)
+    if recorded_kind != dataset_kind and not legacy_matches:
+        raise ValueError(
+            f"destination is not a generated detector dataset: {destination}"
+        )
+
+
+def _transaction_paths(destination: Path) -> tuple[Path, Path, Path]:
+    backup = destination.parent / f".{destination.name}.publish-backup"
+    marker = destination.parent / f".{destination.name}.publish-cleanup.json"
+    marker_temporary = marker.with_name(marker.name + ".tmp")
+    return backup, marker, marker_temporary
+
+
+def _publish_marker_payload(destination: Path, dataset_kind: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "destination_name": destination.name,
+        "dataset_kind": dataset_kind,
+    }
+
+
+def _validate_publish_marker(
+    marker: Path, destination: Path, dataset_kind: str
+) -> None:
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid publish cleanup marker: {marker}") from error
+    if payload != _publish_marker_payload(destination, dataset_kind):
+        raise ValueError(f"publish cleanup marker does not own destination: {marker}")
+
+
+def _write_publish_marker(marker: Path, destination: Path, dataset_kind: str) -> None:
+    temporary = marker.with_name(marker.name + ".tmp")
+    if (
+        marker.exists()
+        or marker.is_symlink()
+        or temporary.exists()
+        or temporary.is_symlink()
+    ):
+        raise ValueError(f"publish cleanup marker already exists: {marker}")
+    try:
+        temporary.write_text(
+            json.dumps(
+                _publish_marker_payload(destination, dataset_kind), indent=2
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, marker)
+    except BaseException:
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
+        raise
+
+
+def _recover_publish_transaction(destination: Path, dataset_kind: str) -> None:
+    backup, marker, marker_temporary = _transaction_paths(destination)
+    if marker_temporary.exists() or marker_temporary.is_symlink():
+        raise ValueError(f"unfinished publish marker write exists: {marker_temporary}")
+    if backup.exists() or backup.is_symlink():
+        if not marker.is_file() or marker.is_symlink():
+            raise ValueError(f"publish backup exists without owned marker: {backup}")
+    if not marker.exists() and not marker.is_symlink():
+        return
+    if marker.is_symlink() or not marker.is_file():
+        raise ValueError(f"invalid publish cleanup marker: {marker}")
+    _validate_publish_marker(marker, destination, dataset_kind)
+    if backup.exists() or backup.is_symlink():
+        if backup.is_symlink() or not backup.is_dir():
+            raise ValueError(f"invalid deterministic publish backup: {backup}")
+        if destination.exists() or destination.is_symlink():
+            try:
+                _validate_generated_destination(backup, dataset_kind)
+            except ValueError:
+                pass
+            shutil.rmtree(backup)
+        else:
+            os.replace(backup, destination)
+    elif not destination.exists() and not destination.is_symlink():
+        raise ValueError("publish marker exists without destination or backup")
+    marker.unlink()
+
+
 def _publish(staging: Path, destination: Path, dataset_kind: str) -> None:
-    if destination.exists():
-        if destination.is_symlink() or not destination.is_dir():
-            raise ValueError(
-                f"detector dataset destination is not a directory: {destination}"
-            )
-        manifest_path = destination / "source_manifest.json"
+    _recover_publish_transaction(destination, dataset_kind)
+    _, marker, _ = _transaction_paths(destination)
+    backup: Path | None = None
+    if destination.exists() or destination.is_symlink():
+        _validate_generated_destination(destination, dataset_kind)
+        backup, marker, _ = _transaction_paths(destination)
+        _write_publish_marker(marker, destination, dataset_kind)
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise ValueError(
-                f"destination is not a generated detector dataset: {destination}"
-            ) from error
-        recorded_kind = manifest.get("dataset_kind")
-        legacy_matches = (
-            dataset_kind == "fold" and type(manifest.get("heldout_fold")) is int
-        ) or (dataset_kind == "all_data" and manifest.get("all_data") is True)
-        if recorded_kind != dataset_kind and not legacy_matches:
-            raise ValueError(
-                f"destination is not a generated detector dataset: {destination}"
-            )
-        shutil.rmtree(destination)
-    os.replace(staging, destination)
+            os.replace(destination, backup)
+        except BaseException:
+            if marker.exists() and not marker.is_symlink():
+                marker.unlink()
+            raise
+
+    try:
+        os.replace(staging, destination)
+    except BaseException as publish_error:
+        if backup is not None and backup.exists():
+            try:
+                if destination.exists() or destination.is_symlink():
+                    if destination.is_symlink() or not destination.is_dir():
+                        raise RuntimeError(
+                            "cannot roll back over an unexpected destination"
+                        )
+                    shutil.rmtree(destination)
+                os.replace(backup, destination)
+                if marker.exists() and not marker.is_symlink():
+                    marker.unlink()
+            except BaseException as rollback_error:
+                raise RuntimeError(
+                    f"detector dataset publish and rollback failed; "
+                    f"previous dataset remains at {backup}"
+                ) from ExceptionGroup(
+                    "publish and rollback failures",
+                    (publish_error, rollback_error),
+                )
+        raise
+    else:
+        if backup is not None:
+            try:
+                shutil.rmtree(backup)
+            except OSError:
+                return
+            if marker.exists() and not marker.is_symlink():
+                marker.unlink()
 
 
 def build_detector_fold_dataset(
