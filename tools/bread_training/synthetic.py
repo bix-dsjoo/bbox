@@ -6,7 +6,11 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import random
+import shutil
+import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -217,33 +221,35 @@ def validate_scene_boxes(
                 raise SyntheticQualityError("object_overlap")
 
 
-def _warm_mask(image: np.ndarray) -> np.ndarray:
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    hue, saturation, value = cv2.split(hsv)
-    blue, green, red = cv2.split(image)
-    maximum = np.maximum.reduce([blue, green, red])
-    minimum = np.minimum.reduce([blue, green, red])
-    chroma = maximum - minimum
-    warm_hue = ((hue <= 42) | (hue >= 168)) & (saturation >= 18) & (value >= 45)
-    warm_rgb = (
-        (red.astype(np.int16) > green.astype(np.int16) - 8)
-        & (red.astype(np.int16) > blue.astype(np.int16) + 12)
-        & (value >= 55)
-        & (chroma >= 14)
-    )
-    mask = (warm_hue | warm_rgb).astype(np.uint8) * 255
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+def visible_halo_score(image: np.ndarray, mask: np.ndarray) -> float:
+    """Measure exterior pixels that resemble the foreground more than background."""
 
-
-def _halo_score(image: np.ndarray, mask: np.ndarray) -> float:
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    ring = (cv2.dilate(mask, kernel) > 0) & (mask == 0)
-    if not np.any(ring):
-        return 0.0
-    warm = _warm_mask(image) > 0
-    return float(np.count_nonzero(warm & ring) / np.count_nonzero(ring))
+    if (
+        not isinstance(image, np.ndarray)
+        or image.ndim != 3
+        or image.shape[2] != 3
+        or not isinstance(mask, np.ndarray)
+        or mask.ndim != 2
+        or image.shape[:2] != mask.shape
+    ):
+        raise SyntheticQualityError("invalid_halo_fixture")
+    binary = (mask > 0).astype(np.uint8)
+    mask_bbox(binary)
+    inner_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    outer_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    reference_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    inner_ring = (binary > 0) & (cv2.erode(binary, inner_kernel) == 0)
+    outer_extent = cv2.dilate(binary, outer_kernel) > 0
+    outer_ring = outer_extent & (binary == 0)
+    reference_ring = (cv2.dilate(binary, reference_kernel) > 0) & ~outer_extent
+    if not np.any(inner_ring) or not np.any(outer_ring) or not np.any(reference_ring):
+        raise SyntheticQualityError("halo_context_missing")
+    foreground_color = np.median(image[inner_ring].astype(np.float32), axis=0)
+    background_color = np.median(image[reference_ring].astype(np.float32), axis=0)
+    exterior = image[outer_ring].astype(np.float32)
+    foreground_distance = np.linalg.norm(exterior - foreground_color, axis=1)
+    background_distance = np.linalg.norm(exterior - background_color, axis=1)
+    return float(np.mean(foreground_distance < background_distance))
 
 
 def _foreground_coverage(mask: np.ndarray) -> float:
@@ -267,21 +273,87 @@ def _decode_image(image: CatalogImage) -> np.ndarray:
     return decoded
 
 
+def _canonical_mask_sha256(mask: np.ndarray) -> str:
+    return hashlib.sha256((mask > 0).astype(np.uint8).tobytes()).hexdigest()
+
+
+def _validated_audit_path(value: object, raw_root: Path, field: str) -> Path:
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise SyntheticQualityError(f"malformed_{field}")
+    path = Path(value).resolve()
+    try:
+        path.relative_to(raw_root.resolve())
+    except ValueError:
+        pass
+    else:
+        raise SyntheticQualityError(f"{field}_under_raw_root")
+    if not any(
+        _is_relative_to(path, (REPOSITORY_ROOT / directory).resolve())
+        for directory in ("datasets", "outputs")
+    ):
+        raise SyntheticQualityError(f"{field}_outside_derived_roots")
+    if not path.is_file():
+        raise SyntheticQualityError(f"missing_{field}")
+    return path
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
 def _approved_asset(
-    image: CatalogImage, assigned_fold: int, size: int
+    image: CatalogImage,
+    assigned_fold: int,
+    size: int,
+    evidence: object,
+    raw_root: Path,
 ) -> _ApprovedAsset:
+    if not isinstance(evidence, Mapping):
+        raise SyntheticQualityError("missing_background_audit")
+    if (
+        evidence.get("kind") != "accepted_foreground_removal"
+        or evidence.get("foreground_mask_accepted") is not True
+        or evidence.get("residual_background_accepted") is not True
+        or not isinstance(evidence.get("audit_id"), str)
+        or not str(evidence["audit_id"]).strip()
+    ):
+        raise SyntheticQualityError("incomplete_background_audit")
     decoded = _decode_image(image)
-    mask = _warm_mask(decoded)
-    halo = _halo_score(decoded, mask)
+    mask_path = _validated_audit_path(evidence.get("mask_path"), raw_root, "mask_path")
+    mask = cv2.imdecode(np.fromfile(mask_path, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    if mask is None or mask.shape != decoded.shape[:2]:
+        raise SyntheticQualityError("audited_mask_shape_mismatch")
+    expected_mask_checksum = evidence.get("mask_sha256")
+    if (
+        not isinstance(expected_mask_checksum, str)
+        or _canonical_mask_sha256(mask) != expected_mask_checksum
+    ):
+        raise SyntheticQualityError("audited_mask_checksum_mismatch")
+    halo = visible_halo_score(decoded, mask)
     bbox = validate_mask_quality(
         mask,
         clipped_coverage=_foreground_coverage(mask),
         halo_score=halo,
     )
-    removal_mask = cv2.dilate(
-        mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+    background_path = _validated_audit_path(
+        evidence.get("background_path"), raw_root, "background_path"
     )
-    background = cv2.inpaint(decoded, removal_mask, 7, cv2.INPAINT_TELEA)
+    expected_background_checksum = evidence.get("background_sha256")
+    if (
+        not isinstance(expected_background_checksum, str)
+        or hashlib.sha256(background_path.read_bytes()).hexdigest()
+        != expected_background_checksum
+    ):
+        raise SyntheticQualityError("audited_background_checksum_mismatch")
+    background = cv2.imdecode(
+        np.fromfile(background_path, dtype=np.uint8), cv2.IMREAD_COLOR
+    )
+    if background is None or background.shape != decoded.shape:
+        raise SyntheticQualityError("audited_background_shape_mismatch")
     background = cv2.resize(background, (size, size), interpolation=cv2.INTER_AREA)
     return _ApprovedAsset(
         BackgroundCandidate(image.key, image.source_kind, assigned_fold, True),
@@ -295,26 +367,35 @@ def _approved_asset(
 
 def _assignment_maps(
     assignments: Mapping[str, Any],
-) -> tuple[dict[str, int], dict[str, int]]:
+) -> tuple[dict[str, int], dict[str, int], dict[str, object]]:
     if not isinstance(assignments, Mapping):
         raise LeakageError("Fold assignments must be a mapping")
     if "mixed_assignments" in assignments or "single_product_assignments" in assignments:
         mixed_value = assignments.get("mixed_assignments", {})
         single_value = assignments.get("single_product_assignments", {})
-        if not isinstance(mixed_value, Mapping) or not isinstance(single_value, Mapping):
+        approval_value = assignments.get("approved_backgrounds", {})
+        if (
+            not isinstance(mixed_value, Mapping)
+            or not isinstance(single_value, Mapping)
+            or not isinstance(approval_value, Mapping)
+        ):
             raise LeakageError("Split assignment sections must be mappings")
         mixed = dict(mixed_value)
         single = dict(single_value)
+        approvals = dict(approval_value)
     else:
         mixed = {key: value for key, value in assignments.items() if str(key).startswith("Test_")}
         single = {
             key: value for key, value in assignments.items() if not str(key).startswith("Test_")
         }
+        approvals = {}
     for group in (mixed, single):
         for key, value in group.items():
             if not isinstance(key, str) or not key.strip() or type(value) is not int:
                 raise LeakageError("Fold assignments require non-blank keys and integer folds")
-    return dict(mixed), dict(single)
+    if any(not isinstance(key, str) or not key.strip() for key in approvals):
+        raise LeakageError("Approved background keys must be non-blank strings")
+    return dict(mixed), dict(single), approvals
 
 
 def _training_area_range(
@@ -363,21 +444,89 @@ def _validate_output(output: Path, raw_root: Path) -> Path:
     return resolved
 
 
-def _prepare_output(output: Path) -> tuple[Path, Path]:
-    image_dir = output / "images" / "train"
-    label_dir = output / "labels" / "train"
+def _write_text(path: Path, value: str) -> None:
+    path.write_text(value, encoding="utf-8")
+
+
+def _encode_jpeg(image: np.ndarray) -> bytes:
+    ok, encoded = cv2.imencode(
+        ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 92]
+    )
+    if not ok:
+        raise OSError("jpeg_encoding_failed")
+    return encoded.tobytes()
+
+
+def _create_staging_copy(output: Path, fold: int) -> Path:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{output.name}.fold-{fold}-staging-", dir=output.parent
+        )
+    )
+    if output.exists():
+        shutil.copytree(output, staging, dirs_exist_ok=True)
+    return staging
+
+
+def _read_lineage(output: Path) -> list[dict[str, Any]]:
+    path = output / "lineage.jsonl"
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise SyntheticQualityError(
+                f"malformed_existing_lineage:{line_number}"
+            ) from error
+        if not isinstance(row, dict) or type(row.get("fold")) is not int:
+            raise SyntheticQualityError(f"malformed_existing_lineage:{line_number}")
+        rows.append(row)
+    return rows
+
+
+def _read_status_folds(output: Path) -> dict[str, dict[str, Any]]:
+    path = output / "status.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise SyntheticQualityError("malformed_existing_status") from error
+    if not isinstance(payload, dict):
+        raise SyntheticQualityError("malformed_existing_status")
+    if payload.get("schema_version") == 2 and isinstance(payload.get("folds"), dict):
+        result = payload["folds"]
+    elif payload.get("schema_version") == 1 and type(payload.get("fold")) is int:
+        result = {str(payload["fold"]): payload}
+    else:
+        raise SyntheticQualityError("malformed_existing_status")
+    if any(not isinstance(key, str) or not isinstance(value, dict) for key, value in result.items()):
+        raise SyntheticQualityError("malformed_existing_status")
+    return {key: dict(value) for key, value in result.items()}
+
+
+def _prepare_fold_staging(
+    staging: Path, fold: int
+) -> tuple[Path, Path, list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    image_dir = staging / "images" / "train"
+    label_dir = staging / "labels" / "train"
     image_dir.mkdir(parents=True, exist_ok=True)
     label_dir.mkdir(parents=True, exist_ok=True)
-    for path in image_dir.glob("synth_fold*_*.jpg"):
+    for path in image_dir.glob(f"synth_fold{fold}_*.jpg"):
         path.unlink()
-    for path in label_dir.glob("synth_fold*_*.txt"):
+    for path in label_dir.glob(f"synth_fold{fold}_*.txt"):
         path.unlink()
-    (output / "lineage.jsonl").write_text("", encoding="utf-8")
-    return image_dir, label_dir
+    retained_lineage = [row for row in _read_lineage(staging) if row["fold"] != fold]
+    statuses = _read_status_folds(staging)
+    statuses.pop(str(fold), None)
+    return image_dir, label_dir, retained_lineage, statuses
 
 
-def _write_status(
-    output: Path,
+def _write_fold_metadata(
+    staging: Path,
     *,
     fold: int,
     seed: int,
@@ -385,9 +534,11 @@ def _write_status(
     generated_count: int,
     approved_backgrounds: int,
     disabled_reason: str | None,
+    retained_lineage: Sequence[Mapping[str, Any]],
+    records: Sequence[SyntheticRecord],
+    statuses: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    payload = {
-        "schema_version": 1,
+    fold_status = {
         "fold": fold,
         "seed": seed,
         "requested_count": requested_count,
@@ -395,9 +546,58 @@ def _write_status(
         "approved_backgrounds": approved_backgrounds,
         "disabled_reason": disabled_reason,
     }
-    (output / "status.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    combined_lineage = [dict(row) for row in retained_lineage]
+    combined_lineage.extend(record.to_json() for record in records)
+    combined_lineage.sort(key=lambda row: (row["fold"], row["output_key"]))
+    _write_text(
+        staging / "lineage.jsonl",
+        "".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            for row in combined_lineage
+        ),
     )
+    combined_statuses = {key: dict(value) for key, value in statuses.items()}
+    combined_statuses[str(fold)] = fold_status
+    _write_text(
+        staging / "status.json",
+        json.dumps(
+            {"schema_version": 2, "folds": dict(sorted(combined_statuses.items()))},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+
+def _validate_staged_fold(staging: Path, fold: int, generated_count: int) -> None:
+    image_count = len(list((staging / "images" / "train").glob(f"synth_fold{fold}_*.jpg")))
+    label_count = len(list((staging / "labels" / "train").glob(f"synth_fold{fold}_*.txt")))
+    lineage_count = sum(row["fold"] == fold for row in _read_lineage(staging))
+    status = _read_status_folds(staging).get(str(fold))
+    if (
+        image_count != generated_count
+        or label_count != generated_count
+        or lineage_count != generated_count
+        or status is None
+        or status.get("generated_count") != generated_count
+    ):
+        raise SyntheticQualityError("staged_fold_validation_failed")
+
+
+def _publish_staging(staging: Path, output: Path) -> None:
+    backup = output.parent / f".{output.name}.backup-{uuid.uuid4().hex}"
+    had_output = output.exists()
+    if had_output:
+        os.replace(output, backup)
+    try:
+        os.replace(staging, output)
+    except BaseException:
+        if had_output and backup.exists() and not output.exists():
+            os.replace(backup, output)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
 
 
 def _scene_seed(seed: int, fold: int, index: int) -> int:
@@ -512,7 +712,7 @@ def _write_yolo_label(
         lines.append(
             f"0 {center_x:.8f} {center_y:.8f} {width / size:.8f} {height / size:.8f}"
         )
-    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    _write_text(path, "\n".join(lines) + ("\n" if lines else ""))
 
 
 def build_synthetic_fold(
@@ -531,124 +731,126 @@ def build_synthetic_fold(
         raise ValueError("count must be a non-negative integer")
     if type(seed) is not int:
         raise ValueError("seed must be an integer")
-    mixed_assignments, single_assignments = _assignment_maps(assignments)
+    mixed_assignments, single_assignments, approvals = _assignment_maps(assignments)
     output = _validate_output(Path(output), Path(catalog.raw_root))
-    image_dir, label_dir = _prepare_output(output)
-
-    assets: list[_ApprovedAsset] = []
-    approved_asset_limit = min(64, max(4, count * 2))
-    for image in sorted(catalog.images, key=lambda item: item.key):
-        if image.source_kind != "single_bread":
-            continue
-        assigned_fold = single_assignments.get(image.key)
-        if type(assigned_fold) is not int or assigned_fold == fold:
-            continue
-        try:
-            asset = _approved_asset(image, assigned_fold, DEFAULT_SIZE)
-            choose_background((asset.candidate,), fold, image.key)
-        except SyntheticQualityError:
-            continue
-        assets.append(asset)
-        if len(assets) >= approved_asset_limit:
-            break
-
-    if count == 0:
-        _write_status(
-            output,
-            fold=fold,
-            seed=seed,
-            requested_count=count,
-            generated_count=0,
-            approved_backgrounds=len(assets),
-            disabled_reason=None,
+    staging = _create_staging_copy(output, fold)
+    try:
+        image_dir, label_dir, retained_lineage, statuses = _prepare_fold_staging(
+            staging, fold
         )
-        return []
-    if not assets:
-        _write_status(
-            output,
-            fold=fold,
-            seed=seed,
-            requested_count=count,
-            generated_count=0,
-            approved_backgrounds=0,
-            disabled_reason="no_approved_backgrounds",
-        )
-        return []
+        assets: list[_ApprovedAsset] = []
+        if count > 0:
+            approved_asset_limit = min(64, max(4, count * 2))
+            for image in sorted(catalog.images, key=lambda item: item.key):
+                if image.source_kind != "single_bread":
+                    continue
+                assigned_fold = single_assignments.get(image.key)
+                evidence = approvals.get(image.key)
+                if (
+                    type(assigned_fold) is not int
+                    or assigned_fold == fold
+                    or evidence is None
+                ):
+                    continue
+                try:
+                    asset = _approved_asset(
+                        image,
+                        assigned_fold,
+                        DEFAULT_SIZE,
+                        evidence,
+                        Path(catalog.raw_root),
+                    )
+                    choose_background((asset.candidate,), fold, image.key)
+                except SyntheticQualityError:
+                    continue
+                assets.append(asset)
+                if len(assets) >= approved_asset_limit:
+                    break
 
-    area_range = _training_area_range(catalog, mixed_assignments, fold)
-    records: list[SyntheticRecord] = []
-    for index in range(count):
-        scene_seed = _scene_seed(seed, fold, index)
-        rng = random.Random(scene_seed)
-        background_asset = rng.choice(assets)
-        choose_background(
-            (asset.candidate for asset in assets),
-            held_out_fold=fold,
-            candidate_key=background_asset.candidate.key,
-        )
-        canvas = background_asset.background.copy()
-        last_error: SyntheticQualityError | None = None
-        for _ in range(40):
-            foreground_asset = rng.choice(assets)
-            try:
-                foreground, foreground_mask, box, transform = _transformed_object(
-                    foreground_asset, rng, DEFAULT_SIZE, area_range
+        records: list[SyntheticRecord] = []
+        disabled_reason = None
+        if count > 0 and not assets:
+            disabled_reason = "no_approved_backgrounds"
+        elif count > 0:
+            area_range = _training_area_range(catalog, mixed_assignments, fold)
+            for index in range(count):
+                scene_seed = _scene_seed(seed, fold, index)
+                rng = random.Random(scene_seed)
+                background_asset = rng.choice(assets)
+                choose_background(
+                    (asset.candidate for asset in assets),
+                    held_out_fold=fold,
+                    candidate_key=background_asset.candidate.key,
                 )
-                validate_scene_boxes((box,), max_overlap=MAX_OBJECT_OVERLAP)
-            except SyntheticQualityError as error:
-                last_error = error
-                continue
-            _composite(canvas, foreground, foreground_mask, transform)
-            combined_mask = np.zeros((DEFAULT_SIZE, DEFAULT_SIZE), dtype=np.uint8)
-            offset_x = int(transform["offset_x"])
-            offset_y = int(transform["offset_y"])
-            mask_height, mask_width = foreground_mask.shape
-            combined_mask[
-                offset_y : offset_y + mask_height,
-                offset_x : offset_x + mask_width,
-            ] = foreground_mask
-            stem = f"synth_fold{fold}_{index:05d}"
-            output_key = f"images/train/{stem}.jpg"
-            image_path = image_dir / f"{stem}.jpg"
-            encoded = cv2.imencode(
-                ".jpg", canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 92]
-            )[1]
-            encoded.tofile(str(image_path))
-            _write_yolo_label(label_dir / f"{stem}.txt", (box,), DEFAULT_SIZE)
-            record = SyntheticRecord(
-                output_key=output_key,
-                fold=fold,
-                seed=scene_seed,
-                background_key=background_asset.candidate.key,
-                source_keys=(foreground_asset.candidate.key,),
-                mask_sha256=hashlib.sha256(combined_mask.tobytes()).hexdigest(),
-                boxes_xywh=(box,),
-                transforms=(transform,),
-            )
-            records.append(record)
-            break
-        else:
-            raise SyntheticQualityError(
-                f"could_not_build_scene:{index}:{last_error or 'quality_rejected'}"
-            )
+                canvas = background_asset.background.copy()
+                last_error: SyntheticQualityError | None = None
+                for _ in range(40):
+                    foreground_asset = rng.choice(assets)
+                    try:
+                        foreground, foreground_mask, box, transform = _transformed_object(
+                            foreground_asset, rng, DEFAULT_SIZE, area_range
+                        )
+                        validate_scene_boxes((box,), max_overlap=MAX_OBJECT_OVERLAP)
+                    except SyntheticQualityError as error:
+                        last_error = error
+                        continue
+                    _composite(canvas, foreground, foreground_mask, transform)
+                    combined_mask = np.zeros(
+                        (DEFAULT_SIZE, DEFAULT_SIZE), dtype=np.uint8
+                    )
+                    offset_x = int(transform["offset_x"])
+                    offset_y = int(transform["offset_y"])
+                    mask_height, mask_width = foreground_mask.shape
+                    combined_mask[
+                        offset_y : offset_y + mask_height,
+                        offset_x : offset_x + mask_width,
+                    ] = foreground_mask
+                    stem = f"synth_fold{fold}_{index:05d}"
+                    output_key = f"images/train/{stem}.jpg"
+                    (image_dir / f"{stem}.jpg").write_bytes(_encode_jpeg(canvas))
+                    _write_yolo_label(
+                        label_dir / f"{stem}.txt", (box,), DEFAULT_SIZE
+                    )
+                    records.append(
+                        SyntheticRecord(
+                            output_key=output_key,
+                            fold=fold,
+                            seed=scene_seed,
+                            background_key=background_asset.candidate.key,
+                            source_keys=(foreground_asset.candidate.key,),
+                            mask_sha256=hashlib.sha256(
+                                combined_mask.tobytes()
+                            ).hexdigest(),
+                            boxes_xywh=(box,),
+                            transforms=(transform,),
+                        )
+                    )
+                    break
+                else:
+                    raise SyntheticQualityError(
+                        f"could_not_build_scene:{index}:"
+                        f"{last_error or 'quality_rejected'}"
+                    )
 
-    assert_no_mixed_scene_leakage(mixed_assignments, records)
-    (output / "lineage.jsonl").write_text(
-        "".join(
-            json.dumps(record.to_json(), ensure_ascii=False, sort_keys=True) + "\n"
-            for record in records
-        ),
-        encoding="utf-8",
-    )
-    _write_status(
-        output,
-        fold=fold,
-        seed=seed,
-        requested_count=count,
-        generated_count=len(records),
-        approved_backgrounds=len(assets),
-        disabled_reason=None,
-    )
+        assert_no_mixed_scene_leakage(mixed_assignments, records)
+        _write_fold_metadata(
+            staging,
+            fold=fold,
+            seed=seed,
+            requested_count=count,
+            generated_count=len(records),
+            approved_backgrounds=len(assets),
+            disabled_reason=disabled_reason,
+            retained_lineage=retained_lineage,
+            records=records,
+            statuses=statuses,
+        )
+        _validate_staged_fold(staging, fold, len(records))
+        _publish_staging(staging, output)
+    except BaseException:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
     return records
 
 
@@ -685,7 +887,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         count=args.count,
         seed=args.seed,
     )
-    status = json.loads((args.output / "status.json").read_text(encoding="utf-8"))
+    status_payload = json.loads(
+        (args.output / "status.json").read_text(encoding="utf-8")
+    )
+    status = status_payload["folds"][str(args.fold)]
     print(
         f"generated_count={len(records)} "
         f"disabled_reason={status['disabled_reason']} output={args.output.resolve()}"
