@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "pipelineVersion": "bread-pipeline-v1",
+  "policyVersion": "bread-label-policy-v2",
+  "detector": {
+    "file": "bread_yolov8n_1class_tray_v0_2.pt",
+    "sha256": "e84163ef40dfa829bf37444980eebda2571645a1f1a048d9e35abbcbf6cdd0b1",
+    "imgsz": 640,
+    "confidence": 0.25,
+    "iou": 0.7
+  },
+  "classifier": {
+    "file": "bread_classifier_yolov8n_cls_v1.pt",
+    "sha256": "ec95587bca5c4a2873a12faf180a78bdf59ced648dafca37bba5086d5697fa02",
+    "imgsz": 224,
+    "acceptConfidence": 0.0,
+    "acceptMargin": 0.5045855343341827,
+    "conservativeClasses": [
+      9,
+      10
+    ],
+    "oofPrecision": 0.9438775510204082,
+    "oofCoverage": 0.7686274509803922
+  },
+  "verifier": {
+    "kind": "none",
+    "file": null,
+    "sha256": null,
+    "scoreThreshold": null,
+    "marginThreshold": null
+  },
+  "quality": {
+    "minBoxSize": 45,
+    "maxAreaRatio": 0.38,
+    "edgeMarginPx": 2,
+    "duplicateIou": 0.95
+  },
+  "labels": [
+    {
+      "id": 1,
+      "name": "Walnut Donut"
+    },
+    {
+      "id": 2,
+      "name": "Croffle"
+    },
+    {
+      "id": 3,
+      "name": "Waffle"
+    },
+    {
+      "id": 4,
+      "name": "Scon"
+    },
+    {
+      "id": 5,
+      "name": "Half-moon Croissant"
+    },
+    {
+      "id": 6,
+      "name": "Croissant"
+    },
+    {
+      "id": 7,
+      "name": "Flower Bread"
+    },
+    {
+      "id": 8,
+      "name": "Almond Scon"
+    },
+    {
+      "id": 9,
+      "name": "Dinner Roll"
+    },
+    {
+      "id": 10,
+      "name": "Sugar Donut"
+    },
+    {
+      "id": 11,
+      "name": "Bagel"
+    },
+    {
+      "id": 12,
+      "name": "Egg Tart"
+    },
+    {
+      "id": 13,
+      "name": "Muffin"
+    },
+    {
+      "id": 14,
+      "name": "Burger"
+    },
+    {
+      "id": 15,
+      "name": "Sandwich"
+    },
+    {
+      "id": 16,
+      "name": "Grain Campagne"
+    },
+    {
+      "id": 17,
+      "name": "Almond Campagne"
+    },
+    {
+      "id": 18,
+      "name": "Mini Bread"
+    },
+    {
+      "id": 19,
+      "name": "Pastry Bread"
+    },
+    {
+      "id": 20,
+      "name": "Plain Bread"
+    }
+  ]
+}
