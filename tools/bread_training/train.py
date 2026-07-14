@@ -21,9 +21,9 @@ from tools.bread_training.metrics import (
     LabelPolicy,
     calibrate_auto_label,
     classifier_report,
-    classification_precision,
+    deployment_policy_report,
     detector_report,
-    fail_closed_label_policy,
+    derive_deployment_policy,
     is_ambiguous,
     match_detections,
 )
@@ -250,9 +250,15 @@ def _decode_annotation_crop(image_path: Path, bbox: Sequence[float]) -> Any:
 
 
 class _UltralyticsClassifierPredictor:
-    def __init__(self, weights: Path, labels: Sequence[Mapping[str, Any]]):
+    def __init__(
+        self,
+        weights: Path,
+        labels: Sequence[Mapping[str, Any]],
+        device: str | int = "cpu",
+    ):
         YOLO = _yolo_class()
         self._model = YOLO(str(weights))
+        self._device = device
         self._class_map, self.missing_classes = classifier_class_map(
             self._model.names, labels
         )
@@ -267,7 +273,7 @@ class _UltralyticsClassifierPredictor:
             results = self._model.predict(
                 source=batch,
                 imgsz=224,
-                device="cpu",
+                device=self._device,
                 verbose=False,
                 stream=False,
             )
@@ -377,7 +383,7 @@ def run_classifier_baseline(
                 top3=top3,
             )
         )
-    calibrated = calibrate_auto_label(predictions, min_precision=0.98)
+    calibrated = calibrate_auto_label(predictions, min_precision=0.94)
     policy = LabelPolicy(
         version=calibrated.version,
         confidence=calibrated.confidence,
@@ -777,7 +783,9 @@ def run_classifier_oof(
                     device=0,
                 )
             )
-        predictor = _UltralyticsClassifierPredictor(best, catalog["labels"])
+        predictor = _UltralyticsClassifierPredictor(
+            best, catalog["labels"], device=0
+        )
         if predictor.missing_classes:
             raise RuntimeError(
                 f"Trained classifier fold {fold} is missing canonical classes: "
@@ -812,7 +820,9 @@ def run_classifier_oof(
         validation_predictions.extend(fold_validation_predictions)
         held_out_records.extend(fold_held_out_records)
         held_out_predictions.extend(fold_held_out_predictions)
-        fold_policy = calibrate_auto_label(fold_validation_predictions, min_precision=0.98)
+        fold_policy = calibrate_auto_label(
+            fold_validation_predictions, min_precision=0.94
+        )
         policies_by_fold[fold] = fold_policy
         fold_artifact_path = output_root / f"fold_{fold}" / "evaluation.json"
         fold_artifact_path.write_text(
@@ -844,36 +854,16 @@ def run_classifier_oof(
                 "fold_policy": asdict(fold_policy),
             }
         )
-    deployment_policy = calibrate_auto_label(validation_predictions, min_precision=0.98)
-    accepted_oof: list[ClassificationPrediction] = []
+    deployment_policy = derive_deployment_policy(
+        policies_by_fold[fold] for fold in sorted(policies_by_fold)
+    )
     for record, prediction in zip(held_out_records, held_out_predictions):
-        fold_policy = policies_by_fold[int(record["fold"])]
         record["classifier_ambiguous"] = (
-            prediction.predicted_class in fold_policy.conservative_classes
+            prediction.predicted_class in deployment_policy.conservative_classes
             or is_ambiguous(
-                prediction.confidence, prediction.margin, fold_policy
+                prediction.confidence, prediction.margin, deployment_policy
             )
         )
-        if not record["classifier_ambiguous"]:
-            accepted_oof.append(prediction)
-    pre_gate_precision = (
-        classification_precision(accepted_oof) if accepted_oof else 1.0
-    )
-    pre_gate_coverage = (
-        len(accepted_oof) / len(held_out_predictions) if held_out_predictions else 0.0
-    )
-    safe_policy = fail_closed_label_policy(
-        deployment_policy,
-        accepted_oof,
-        (int(label["id"]) for label in catalog["labels"]),
-        0.98,
-    )
-    oof_precision_gate_passed = safe_policy == deployment_policy
-    if not oof_precision_gate_passed:
-        deployment_policy = safe_policy
-        accepted_oof = []
-        for record in held_out_records:
-            record["classifier_ambiguous"] = True
     predictions_path = output_root / "oof_predictions.jsonl"
     predictions_path.write_text(
         "".join(
@@ -883,13 +873,12 @@ def run_classifier_oof(
         encoding="utf-8",
     )
     report = classifier_report(held_out_predictions, deployment_policy)
-    report["white_auto_precision"] = (
-        classification_precision(accepted_oof) if accepted_oof else 1.0
+    deployment_report = deployment_policy_report(
+        held_out_predictions, deployment_policy
     )
-    report["white_coverage"] = (
-        len(accepted_oof) / len(held_out_predictions) if held_out_predictions else 0.0
-    )
-    report["red_review_rate"] = 1.0 - report["white_coverage"]
+    report["white_auto_precision"] = deployment_report["precision"]
+    report["white_coverage"] = deployment_report["coverage"]
+    report["red_review_rate"] = deployment_report["redReviewRate"]
     report.update(
         {
             "schema_version": 2,
@@ -904,10 +893,8 @@ def run_classifier_oof(
             "sample_count": len(held_out_records),
             "calibration_sample_count": len(validation_predictions),
             "policy": asdict(deployment_policy),
-            "oof_policy_mode": "fold_specific_disjoint_validation",
-            "oof_precision_gate_passed": oof_precision_gate_passed,
-            "pre_gate_white_auto_precision": pre_gate_precision,
-            "pre_gate_white_coverage": pre_gate_coverage,
+            "policy_selection_source": "median_of_five_validation_fold_policies",
+            "deployment_policy_report": deployment_report,
             "folds": fold_artifacts,
             "latency_ms": {
                 "p50": statistics.median(

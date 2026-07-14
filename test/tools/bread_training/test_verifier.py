@@ -22,7 +22,7 @@ def classifier_only_metrics():
     return VerifierMetrics(
         kind="none",
         ambiguous_accuracy_gain=0.0,
-        review_reduction_at_98_precision=0.0,
+        review_reduction_at_policy_precision=0.0,
         auto_precision_drop=0.0,
         p50_ms=0.0,
         p95_ms=0.0,
@@ -35,7 +35,7 @@ class VerifierGateTest(unittest.TestCase):
         metrics = VerifierMetrics(
             kind="mobilenet_v3_small",
             ambiguous_accuracy_gain=0.031,
-            review_reduction_at_98_precision=0.10,
+            review_reduction_at_policy_precision=0.10,
             auto_precision_drop=0.002,
             p50_ms=880,
             p95_ms=1700,
@@ -52,7 +52,7 @@ class VerifierGateTest(unittest.TestCase):
         unsafe = VerifierMetrics(
             kind="yolo_penultimate",
             ambiguous_accuracy_gain=0.04,
-            review_reduction_at_98_precision=0.20,
+            review_reduction_at_policy_precision=0.20,
             auto_precision_drop=0.001,
             p50_ms=999,
             p95_ms=2001,
@@ -64,7 +64,7 @@ class VerifierGateTest(unittest.TestCase):
     def test_selection_is_deterministic_on_equal_benefit(self):
         shared = dict(
             ambiguous_accuracy_gain=0.03,
-            review_reduction_at_98_precision=0.15,
+            review_reduction_at_policy_precision=0.15,
             auto_precision_drop=0.005,
             p50_ms=900,
             p95_ms=1800,
@@ -104,9 +104,17 @@ class ConditionalVerifierEvaluationTest(unittest.TestCase):
             for index in range(20)
         )
 
-        decision = evaluate_verifiers(samples, (Candidate(),))
+        calibration_samples = tuple(
+            VerifierSample(f"cal-{index}", 1, 2, True, index)
+            for index in range(20)
+        )
+        decision = evaluate_verifiers(calibration_samples, samples, (Candidate(),))
 
-        self.assertEqual(calls, [f"red-{index}" for index in range(20)])
+        self.assertEqual(
+            calls,
+            [f"cal-{index}" for index in range(20)]
+            + [f"red-{index}" for index in range(20)],
+        )
         self.assertEqual(decision.metrics.kind, "conditional")
         self.assertEqual(decision.metrics.ambiguous_accuracy_gain, 1.0)
 
@@ -114,7 +122,7 @@ class ConditionalVerifierEvaluationTest(unittest.TestCase):
         metrics = VerifierMetrics(
             kind="empty",
             ambiguous_accuracy_gain=1.0,
-            review_reduction_at_98_precision=1.0,
+            review_reduction_at_policy_precision=1.0,
             auto_precision_drop=0.0,
             p50_ms=1.0,
             p95_ms=1.0,
@@ -122,6 +130,32 @@ class ConditionalVerifierEvaluationTest(unittest.TestCase):
         )
 
         self.assertFalse(verifier_gate(metrics))
+
+    def test_calibration_and_evaluation_samples_must_be_disjoint(self):
+        class Candidate:
+            kind = "conditional"
+
+            def predict(self, samples):
+                return tuple(
+                    VerifierPrediction(
+                        sample.sample_id,
+                        sample.true_class,
+                        0.99,
+                        0.40,
+                        1.0,
+                    )
+                    for sample in samples
+                )
+
+        calibration = (
+            VerifierSample("cal", 1, 1, True, None, image_key="shared"),
+        )
+        evaluation = (
+            VerifierSample("eval", 1, 1, True, None, image_key="shared"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "image keys.*disjoint"):
+            evaluate_verifiers(calibration, evaluation, (Candidate(),))
 
 
 class ConcretePrototypeVerifierTest(unittest.TestCase):

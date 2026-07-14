@@ -28,7 +28,7 @@ class CandidateUnavailable(RuntimeError):
 class VerifierMetrics:
     kind: str
     ambiguous_accuracy_gain: float
-    review_reduction_at_98_precision: float
+    review_reduction_at_policy_precision: float
     auto_precision_drop: float
     p50_ms: float
     p95_ms: float
@@ -49,6 +49,7 @@ class VerifierSample:
     classifier_ambiguous: bool
     payload: Any
     prototype_group: int | None = None
+    image_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -340,7 +341,7 @@ class MobileNetV3SmallVerifier(PrototypeVerifier):
 def verifier_gate(metrics: VerifierMetrics) -> bool:
     benefit = (
         metrics.ambiguous_accuracy_gain >= 0.03
-        or metrics.review_reduction_at_98_precision >= 0.15
+        or metrics.review_reduction_at_policy_precision >= 0.15
     )
     safe = (
         metrics.auto_precision_drop <= 0.005
@@ -368,7 +369,7 @@ def choose_verifier(
     selected = max(
         passing,
         key=lambda item: (
-            item.review_reduction_at_98_precision,
+            item.review_reduction_at_policy_precision,
             item.ambiguous_accuracy_gain,
             -item.p50_ms,
             item.kind,
@@ -392,7 +393,7 @@ def _classifier_only_metrics() -> VerifierMetrics:
     return VerifierMetrics(
         kind="none",
         ambiguous_accuracy_gain=0.0,
-        review_reduction_at_98_precision=0.0,
+        review_reduction_at_policy_precision=0.0,
         auto_precision_drop=0.0,
         p50_ms=0.0,
         p95_ms=0.0,
@@ -400,29 +401,24 @@ def _classifier_only_metrics() -> VerifierMetrics:
     )
 
 
-def _evaluate_candidate(
-    samples: Sequence[VerifierSample], candidate: VerifierCandidate
-) -> VerifierMetrics:
-    baseline_accuracy = (
-        statistics.fmean(
-            sample.classifier_class == sample.true_class for sample in samples
-        )
-        if samples
-        else 0.0
-    )
-    predictions = tuple(candidate.predict(samples)) if samples else ()
+def _validate_predictions(
+    samples: Sequence[VerifierSample],
+    predictions: Sequence[VerifierPrediction],
+    candidate_kind: str,
+) -> None:
     if len(predictions) != len(samples):
-        raise ValueError(f"{candidate.kind} returned the wrong prediction count")
+        raise ValueError(f"{candidate_kind} returned the wrong prediction count")
     expected_ids = tuple(sample.sample_id for sample in samples)
     actual_ids = tuple(prediction.sample_id for prediction in predictions)
     if actual_ids != expected_ids:
-        raise ValueError(f"{candidate.kind} changed verifier sample ordering")
-    correct = tuple(
-        prediction.predicted_class == sample.true_class
-        for sample, prediction in zip(samples, predictions)
-    )
-    candidate_accuracy = statistics.fmean(correct) if correct else 0.0
-    policy_predictions = tuple(
+        raise ValueError(f"{candidate_kind} changed verifier sample ordering")
+
+
+def _policy_predictions(
+    samples: Sequence[VerifierSample],
+    predictions: Sequence[VerifierPrediction],
+) -> tuple[ClassificationPrediction, ...]:
+    return tuple(
         ClassificationPrediction(
             sample_id=prediction.sample_id,
             true_class=sample.true_class,
@@ -433,12 +429,68 @@ def _evaluate_candidate(
         )
         for sample, prediction in zip(samples, predictions)
     )
-    policy = calibrate_auto_label(policy_predictions, min_precision=0.98)
+
+
+def _assert_disjoint_samples(
+    calibration_samples: Sequence[VerifierSample],
+    evaluation_samples: Sequence[VerifierSample],
+) -> None:
+    calibration_ids = {sample.sample_id for sample in calibration_samples}
+    evaluation_ids = {sample.sample_id for sample in evaluation_samples}
+    if calibration_ids & evaluation_ids:
+        raise ValueError("calibration and evaluation sample IDs must be disjoint")
+    calibration_image_keys = {
+        sample.image_key
+        for sample in calibration_samples
+        if sample.image_key is not None
+    }
+    evaluation_image_keys = {
+        sample.image_key
+        for sample in evaluation_samples
+        if sample.image_key is not None
+    }
+    if calibration_image_keys & evaluation_image_keys:
+        raise ValueError("calibration and evaluation image keys must be disjoint")
+
+
+def _evaluate_candidate(
+    calibration_samples: Sequence[VerifierSample],
+    evaluation_samples: Sequence[VerifierSample],
+    candidate: VerifierCandidate,
+    min_precision: float,
+) -> VerifierMetrics:
+    _assert_disjoint_samples(calibration_samples, evaluation_samples)
+    baseline_accuracy = (
+        statistics.fmean(
+            sample.classifier_class == sample.true_class
+            for sample in evaluation_samples
+        )
+        if evaluation_samples
+        else 0.0
+    )
+    calibration_predictions = (
+        tuple(candidate.predict(calibration_samples)) if calibration_samples else ()
+    )
+    _validate_predictions(calibration_samples, calibration_predictions, candidate.kind)
+    policy = calibrate_auto_label(
+        _policy_predictions(calibration_samples, calibration_predictions),
+        min_precision=min_precision,
+    )
+    predictions = (
+        tuple(candidate.predict(evaluation_samples)) if evaluation_samples else ()
+    )
+    _validate_predictions(evaluation_samples, predictions, candidate.kind)
+    correct = tuple(
+        prediction.predicted_class == sample.true_class
+        for sample, prediction in zip(evaluation_samples, predictions)
+    )
+    candidate_accuracy = statistics.fmean(correct) if correct else 0.0
+    policy_predictions = _policy_predictions(evaluation_samples, predictions)
     accepted = apply_label_policy(policy_predictions, policy)
     accepted_ids = {item.sample_id for item in accepted}
     true_support = {
-        class_id: sum(sample.true_class == class_id for sample in samples)
-        for class_id in {sample.true_class for sample in samples}
+        class_id: sum(sample.true_class == class_id for sample in evaluation_samples)
+        for class_id in {sample.true_class for sample in evaluation_samples}
     }
     precisions: dict[int, float] = {}
     for class_id in sorted(
@@ -457,10 +509,10 @@ def _evaluate_candidate(
     return VerifierMetrics(
         kind=candidate.kind,
         ambiguous_accuracy_gain=candidate_accuracy - baseline_accuracy,
-        review_reduction_at_98_precision=(
-            len(accepted) / len(samples) if samples else 0.0
+        review_reduction_at_policy_precision=(
+            len(accepted) / len(evaluation_samples) if evaluation_samples else 0.0
         ),
-        auto_precision_drop=max(0.0, 0.98 - auto_precision),
+        auto_precision_drop=max(0.0, min_precision - auto_precision),
         p50_ms=_percentile(latencies, 0.50),
         p95_ms=_percentile(latencies, 0.95),
         supported_class_precision=precisions,
@@ -468,20 +520,62 @@ def _evaluate_candidate(
 
 
 def evaluate_verifiers(
-    ambiguous_samples: Iterable[VerifierSample],
+    calibration_samples: Iterable[VerifierSample],
+    evaluation_samples: Iterable[VerifierSample],
     candidates: Iterable[VerifierCandidate],
+    min_precision: float = 0.94,
 ) -> VerifierDecision:
-    """Evaluate candidates after filtering out classifier-confident samples."""
+    """Calibrate and evaluate candidates on disjoint ambiguous samples."""
 
-    samples = tuple(
-        sample for sample in ambiguous_samples if sample.classifier_ambiguous
+    calibration_values = tuple(calibration_samples)
+    evaluation_values = tuple(evaluation_samples)
+    _assert_disjoint_samples(calibration_values, evaluation_values)
+    calibration = tuple(
+        sample for sample in calibration_values if sample.classifier_ambiguous
+    )
+    evaluation = tuple(
+        sample for sample in evaluation_values if sample.classifier_ambiguous
     )
     metrics_by_kind: dict[str, VerifierMetrics] = {
         "none": _classifier_only_metrics()
     }
     for candidate in candidates:
-        metrics_by_kind[candidate.kind] = _evaluate_candidate(samples, candidate)
+        metrics_by_kind[candidate.kind] = _evaluate_candidate(
+            calibration, evaluation, candidate, min_precision
+        )
     return choose_verifier(metrics_by_kind)
+
+
+def _mean_verifier_metrics(
+    kind: str, fold_metrics: Sequence[VerifierMetrics]
+) -> VerifierMetrics:
+    if not fold_metrics:
+        raise ValueError("at least one verifier fold metric is required")
+    supported_classes = sorted(
+        set().union(*(item.supported_class_precision for item in fold_metrics))
+    )
+    return VerifierMetrics(
+        kind=kind,
+        ambiguous_accuracy_gain=statistics.fmean(
+            item.ambiguous_accuracy_gain for item in fold_metrics
+        ),
+        review_reduction_at_policy_precision=statistics.fmean(
+            item.review_reduction_at_policy_precision for item in fold_metrics
+        ),
+        auto_precision_drop=statistics.fmean(
+            item.auto_precision_drop for item in fold_metrics
+        ),
+        p50_ms=statistics.fmean(item.p50_ms for item in fold_metrics),
+        p95_ms=statistics.fmean(item.p95_ms for item in fold_metrics),
+        supported_class_precision={
+            class_id: statistics.fmean(
+                item.supported_class_precision[class_id]
+                for item in fold_metrics
+                if class_id in item.supported_class_precision
+            )
+            for class_id in supported_classes
+        },
+    )
 
 
 def run_verifier_bakeoff(predictions_path: Path, output_path: Path) -> Path:
@@ -512,10 +606,32 @@ def run_verifier_bakeoff(predictions_path: Path, output_path: Path) -> Path:
                 "bbox": record["bbox"],
             },
             prototype_group=int(record["fold"]),
+            image_key=str(record["image_key"]),
         )
         for record in records
     )
     ambiguous = tuple(sample for sample in samples if sample.classifier_ambiguous)
+    ambiguous_by_fold = {
+        fold: tuple(
+            sample for sample in ambiguous if sample.prototype_group == fold
+        )
+        for fold in sorted(
+            {
+                int(sample.prototype_group)
+                for sample in ambiguous
+                if sample.prototype_group is not None
+            }
+        )
+    }
+    if len(ambiguous_by_fold) < 2:
+        raise ValueError(
+            "verifier calibration requires ambiguous samples from at least two folds"
+        )
+    fold_order = tuple(ambiguous_by_fold)
+    calibration_routing = {
+        evaluation_fold: fold_order[(index + 1) % len(fold_order)]
+        for index, evaluation_fold in enumerate(fold_order)
+    }
     metrics_by_kind: dict[str, VerifierMetrics] = {
         "none": _classifier_only_metrics()
     }
@@ -549,10 +665,19 @@ def run_verifier_bakeoff(predictions_path: Path, output_path: Path) -> Path:
                         if paths
                     },
                 )
-            metrics_by_kind[kind] = _evaluate_candidate(ambiguous, candidate)
+            fold_metrics = tuple(
+                _evaluate_candidate(
+                    ambiguous_by_fold[calibration_routing[evaluation_fold]],
+                    ambiguous_by_fold[evaluation_fold],
+                    candidate,
+                    0.94,
+                )
+                for evaluation_fold in fold_order
+            )
+            metrics_by_kind[kind] = _mean_verifier_metrics(kind, fold_metrics)
             availability[kind] = {
                 "available": True,
-                "ambiguous_invocations": len(ambiguous),
+                "ambiguous_invocations": 2 * len(ambiguous),
             }
         except CandidateUnavailable as error:
             availability[kind] = {
@@ -569,6 +694,11 @@ def run_verifier_bakeoff(predictions_path: Path, output_path: Path) -> Path:
                 "sample_count": len(samples),
                 "ambiguous_sample_count": len(ambiguous),
                 "conditional_only": True,
+                "minimum_policy_precision": 0.94,
+                "calibration_routing": {
+                    str(evaluation_fold): calibration_fold
+                    for evaluation_fold, calibration_fold in calibration_routing.items()
+                },
                 "availability": availability,
                 "candidates": {
                     kind: asdict(metrics) for kind, metrics in metrics_by_kind.items()

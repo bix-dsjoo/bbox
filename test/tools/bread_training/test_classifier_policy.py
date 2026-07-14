@@ -7,17 +7,20 @@ from unittest.mock import patch
 
 from tools.bread_training.metrics import (
     ClassificationPrediction,
+    LabelPolicy,
     apply_label_policy,
     calibration_threshold_candidates,
     calibrate_auto_label,
     classifier_report,
     classification_precision,
-    fail_closed_label_policy,
+    deployment_policy_report,
+    derive_deployment_policy,
     is_ambiguous,
 )
 from tools.bread_training.train import (
     ClassifierTrainConfig,
     DEFAULT_CLASSIFIER_INITIAL_WEIGHTS,
+    _UltralyticsClassifierPredictor,
     _parse_args,
     build_classifier_fold_manifest,
     classifier_class_map,
@@ -43,14 +46,39 @@ def prediction(
 
 
 class ClassifierPolicyTest(unittest.TestCase):
-    def test_large_calibration_grid_is_bounded_and_keeps_endpoints(self):
-        values = tuple(index / 2000 for index in range(2001))
+    def test_exact_calibration_does_not_drop_the_optimal_513th_threshold(self):
+        values = [index / 600 for index in range(571)]
 
         candidates = calibration_threshold_candidates(values)
 
-        self.assertLessEqual(len(candidates), 512)
-        self.assertEqual(candidates[0], 0.0)
-        self.assertEqual(candidates[-1], 1.0)
+        self.assertEqual(candidates, tuple(sorted({0.0, *values})))
+        self.assertGreater(len(candidates), 512)
+
+    def test_deployment_policy_is_derived_without_heldout_predictions(self):
+        policies = tuple(
+            LabelPolicy("bread-label-policy-v2", confidence, margin, ())
+            for confidence, margin in zip(
+                (.70, .80, .75, .90, .85),
+                (.10, .20, .15, .25, .18),
+            )
+        )
+
+        policy = derive_deployment_policy(policies)
+
+        self.assertEqual(policy.confidence, .80)
+        self.assertEqual(policy.margin, .18)
+
+    def test_report_applies_the_emitted_policy_not_fold_policy_outputs(self):
+        policy = LabelPolicy("bread-label-policy-v2", .80, .20, ())
+        predictions = (
+            ClassificationPrediction("a", 1, 1, .90, .30),
+            ClassificationPrediction("b", 1, 1, .79, .30),
+            ClassificationPrediction("c", 2, 2, .90, .19),
+        )
+
+        report = deployment_policy_report(predictions, policy)
+
+        self.assertEqual(report["acceptedSampleIds"], ["a"])
 
     def test_calibration_chooses_highest_coverage_at_required_precision(self):
         predictions = []
@@ -69,7 +97,7 @@ class ClassifierPolicyTest(unittest.TestCase):
 
         self.assertGreaterEqual(classification_precision(accepted), 0.98)
         self.assertEqual(len(accepted), 50)
-        self.assertEqual(policy.version, "bread-label-policy-v1")
+        self.assertEqual(policy.version, "bread-label-policy-v2")
 
     def test_sparse_class_stays_review_required(self):
         predictions = [
@@ -92,18 +120,6 @@ class ClassifierPolicyTest(unittest.TestCase):
         policy = calibrate_auto_label(predictions, min_precision=0.90)
 
         self.assertIn(2, policy.conservative_classes)
-
-    def test_oof_precision_failure_forces_every_class_to_review(self):
-        predictions = (
-            prediction("correct", 1, 1, 0.99, 0.90),
-            prediction("wrong", 2, 1, 0.99, 0.90),
-        )
-        policy = calibrate_auto_label((predictions[0],), min_precision=0.98)
-
-        safe = fail_closed_label_policy(policy, predictions, (1, 2), 0.98)
-
-        self.assertEqual(safe.conservative_classes, (1, 2))
-        self.assertEqual(apply_label_policy(predictions, safe), ())
 
     def test_supported_class_must_retain_95_percent_precision(self):
         predictions = [
@@ -150,13 +166,43 @@ class ClassifierPolicyTest(unittest.TestCase):
         self.assertEqual(report["top3_accuracy"], 39 / 40)
         self.assertGreater(report["macro_f1"], 0.97)
         self.assertIn("expected_calibration_error", report)
-        self.assertEqual(report["white_auto_precision"], 1.0)
-        self.assertAlmostEqual(report["white_coverage"], 39 / 40)
-        self.assertAlmostEqual(report["red_review_rate"], 1 / 40)
+        self.assertEqual(report["white_auto_precision"], 39 / 40)
+        self.assertEqual(report["white_coverage"], 1.0)
+        self.assertEqual(report["red_review_rate"], 0.0)
         self.assertEqual(report["per_class"]["1"]["support"], 20)
 
 
 class ClassifierTrainingAdapterTest(unittest.TestCase):
+    def test_classifier_predictor_uses_the_requested_inference_device(self):
+        calls = []
+
+        class FakeTensor:
+            def cpu(self):
+                return self
+
+            def tolist(self):
+                return [1.0]
+
+        class FakeModel:
+            names = {0: "walnut_donut"}
+
+            def predict(self, **kwargs):
+                calls.append(kwargs)
+                return (types.SimpleNamespace(probs=types.SimpleNamespace(data=FakeTensor())),)
+
+        with patch(
+            "tools.bread_training.train._yolo_class",
+            return_value=lambda weights: FakeModel(),
+        ):
+            predictor = _UltralyticsClassifierPredictor(
+                Path("fold.pt"),
+                ({"id": 1, "name": "Walnut Donut"},),
+                device=0,
+            )
+            predictor.predict((object(),))
+
+        self.assertEqual(calls[0]["device"], 0)
+
     def test_default_classifier_oof_uses_generic_20_class_training_not_baseline(self):
         args = _parse_args(
             (

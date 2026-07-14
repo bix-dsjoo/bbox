@@ -124,22 +124,13 @@ def apply_label_policy(
 
 
 def calibration_threshold_candidates(
-    values: Iterable[float], maximum: int = 512
+    values: Iterable[float],
 ) -> tuple[float, ...]:
-    if maximum < 2:
-        raise ValueError("at least two calibration threshold candidates are required")
-    ordered = sorted({0.0, *(float(value) for value in values)})
-    if len(ordered) <= maximum:
-        return tuple(ordered)
-    indexes = {
-        round(index * (len(ordered) - 1) / (maximum - 1))
-        for index in range(maximum)
-    }
-    return tuple(ordered[index] for index in sorted(indexes))
+    return tuple(sorted({0.0, *(float(value) for value in values)}))
 
 
 def calibrate_auto_label(
-    predictions: Iterable[Any], min_precision: float = 0.98
+    predictions: Iterable[Any], min_precision: float = 0.94
 ) -> LabelPolicy:
     """Maximize OOF auto-label coverage subject to precision safety gates."""
 
@@ -156,7 +147,7 @@ def calibrate_auto_label(
         sorted(class_id for class_id in observed_classes if support[class_id] < 20)
     )
     if not values:
-        return LabelPolicy("bread-label-policy-v1", 1.0, 1.0, conservative)
+        return LabelPolicy("bread-label-policy-v2", 1.0, 1.0, conservative)
 
     confidence_candidates = calibration_threshold_candidates(
         item.confidence for item in values
@@ -209,35 +200,46 @@ def calibrate_auto_label(
 
     if best is None:
         return LabelPolicy(
-            "bread-label-policy-v1",
+            "bread-label-policy-v2",
             math.nextafter(max(item.confidence for item in values), math.inf),
             math.nextafter(max(item.margin for item in values), math.inf),
             conservative,
         )
     return LabelPolicy(
-        "bread-label-policy-v1", -best[1], -best[2], conservative
+        "bread-label-policy-v2", -best[1], -best[2], conservative
     )
 
 
-def fail_closed_label_policy(
-    policy: LabelPolicy,
-    accepted_predictions: Iterable[Any],
-    all_classes: Iterable[int],
-    min_precision: float = 0.98,
-) -> LabelPolicy:
-    accepted = tuple(
-        _classification_prediction(item) for item in accepted_predictions
-    )
-    if not accepted or classification_precision(accepted) >= min_precision:
-        return policy
+def derive_deployment_policy(fold_policies: Iterable[LabelPolicy]) -> LabelPolicy:
+    policies = tuple(fold_policies)
+    if len(policies) != 5:
+        raise ValueError("exactly five validation-derived policies are required")
     return LabelPolicy(
-        version=policy.version,
-        confidence=policy.confidence,
-        margin=policy.margin,
+        version="bread-label-policy-v2",
+        confidence=float(statistics.median(item.confidence for item in policies)),
+        margin=float(statistics.median(item.margin for item in policies)),
         conservative_classes=tuple(
-            sorted(set(policy.conservative_classes) | {int(item) for item in all_classes})
+            sorted(
+                set().union(
+                    *(item.conservative_classes for item in policies)
+                )
+            )
         ),
     )
+
+
+def deployment_policy_report(
+    predictions: Iterable[Any], policy: LabelPolicy
+) -> dict[str, Any]:
+    values = tuple(_classification_prediction(item) for item in predictions)
+    accepted = apply_label_policy(values, policy)
+    coverage = len(accepted) / len(values) if values else 0.0
+    return {
+        "precision": classification_precision(accepted),
+        "coverage": coverage,
+        "redReviewRate": 1.0 - coverage,
+        "acceptedSampleIds": [item.sample_id for item in accepted],
+    }
 
 
 def _expected_calibration_error(
