@@ -10,7 +10,7 @@
     "iou": 0.7
   },
   "classifier": {
-    "file": "bread_classifier_yolov8n_cls_v1.pt",
+    "file": "bread_classifier_yolov8n_cls_v1_ec95587bca5c4a2873a12faf180a78bdf59ced648dafca37bba5086d5697fa02.pt",
     "sha256": "ec95587bca5c4a2873a12faf180a78bdf59ced648dafca37bba5086d5697fa02",
     "imgsz": 224,
     "acceptConfidence": 0.0,

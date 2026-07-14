@@ -24,9 +24,12 @@ from tools.bread_training.run_selection import (
     run_selection,
     SelectionConfig,
     _ensure_classifier_validation_scaffold,
+    _classifier_deployment_path,
     _guard_manifest_path,
     _guard_output_path,
     _materialize_final_classifier_dataset,
+    _publish_manifest,
+    _validate_classifier_provenance,
     _validate_catalog_sources,
     _write_json_atomic,
 )
@@ -38,6 +41,46 @@ from tools.bread_training.verifier import (
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _fold_contract_inputs():
+    catalog = {
+        "images": [
+            {"key": f"mixed-{fold}", "source_kind": "mixed_scene"}
+            for fold in range(5)
+        ]
+        + [
+            {"key": f"single-{fold}", "source_kind": "single_bread"}
+            for fold in range(5)
+        ]
+    }
+    split = {
+        "folds": 5,
+        "mixed_assignments": {f"mixed-{fold}": fold for fold in range(5)},
+        "single_product_assignments": {
+            f"single-{fold}": fold for fold in range(5)
+        },
+    }
+    return catalog, split
+
+
+def _fold_manifest_payload(fold: int):
+    validation = (fold + 1) % 5
+    training_folds = [item for item in range(5) if item not in {fold, validation}]
+    return {
+        "schema_version": 1,
+        "fold": fold,
+        "validation_fold": validation,
+        "held_out_mixed_keys": [f"mixed-{fold}"],
+        "validation_mixed_keys": [f"mixed-{validation}"],
+        "training_mixed_keys": [f"mixed-{item}" for item in training_folds],
+        "validation_single_keys": [f"single-{validation}"],
+        "training_single_keys": [f"single-{item}" for item in training_folds],
+        "held_out_absent_from_train_val": True,
+        "class_directories": {},
+        "counts": {"train": {}, "val": {}},
+        "sources": [],
+    }
 
 
 class RunSelectionTest(unittest.TestCase):
@@ -214,6 +257,7 @@ class RunSelectionTest(unittest.TestCase):
             "detector imgsz": lambda item: item["detector"].update(imgsz=320),
             "classifier imgsz": lambda item: item["classifier"].update(imgsz=640),
             "label name": lambda item: item["labels"][15].update(name="Wrong"),
+            "label id bool": lambda item: item["labels"][0].update(id=True),
             "conservative classes": lambda item: item["classifier"].update(
                 conservativeClasses=[10, 9]
             ),
@@ -226,6 +270,226 @@ class RunSelectionTest(unittest.TestCase):
                 manifest_path.write_text(json.dumps(payload), encoding="utf-8")
                 with self.assertRaises(SelectionError):
                     audit_manifest_contract(manifest_path)
+
+    def test_manifest_audit_rejects_bool_string_and_wrong_numeric_types(self):
+        manifest_path = self.root / "bread_pipeline_manifest.json"
+        mutations = {
+            "confidence bool": lambda item: item["detector"].update(confidence=True),
+            "confidence string": lambda item: item["detector"].update(confidence="0.25"),
+            "iou string": lambda item: item["detector"].update(iou="0.7"),
+            "precision string": lambda item: item["classifier"].update(
+                oofPrecision="0.95"
+            ),
+            "margin bool": lambda item: item["classifier"].update(
+                acceptMargin=False
+            ),
+            "min box float": lambda item: item["quality"].update(minBoxSize=45.0),
+            "min box bool": lambda item: item["quality"].update(minBoxSize=True),
+            "edge margin float": lambda item: item["quality"].update(
+                edgeMarginPx=2.0
+            ),
+            "area ratio int": lambda item: item["quality"].update(maxAreaRatio=0),
+            "area ratio string": lambda item: item["quality"].update(
+                maxAreaRatio="0.38"
+            ),
+            "duplicate iou bool": lambda item: item["quality"].update(
+                duplicateIou=True
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                payload = build_manifest(self._selection())
+                mutate(payload)
+                manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaises(SelectionError):
+                    audit_manifest_contract(manifest_path)
+
+    def test_build_manifest_rejects_wrong_policy_and_noncanonical_label_name(self):
+        selection = self._selection()
+        with self.assertRaisesRegex(SelectionError, "policyVersion"):
+            build_manifest(
+                replace(
+                    selection,
+                    label_policy=replace(selection.label_policy, version="wrong"),
+                )
+            )
+        labels = list(selection.catalog.labels)
+        labels[15] = (16, "Wrong Campagne")
+        with self.assertRaisesRegex(SelectionError, "canonical ordered"):
+            build_manifest(
+                replace(
+                    selection,
+                    catalog=replace(selection.catalog, labels=tuple(labels)),
+                )
+            )
+
+    def test_classifier_provenance_requires_exact_leakage_safe_v2_claims(self):
+        classifier_root = self.root / "classifier-provenance"
+        classifier_root.mkdir()
+        catalog, split = _fold_contract_inputs()
+        folds = []
+        for fold in range(5):
+            fold_root = classifier_root / f"fold_{fold}"
+            manifest = fold_root / "fold_manifest.json"
+            weights = fold_root / "train" / "weights" / "best.pt"
+            weights.parent.mkdir(parents=True)
+            manifest.write_text(
+                json.dumps(_fold_manifest_payload(fold)), encoding="utf-8"
+            )
+            weights.write_bytes(f"fold-{fold}".encode())
+            folds.append(
+                {
+                    "fold": fold,
+                    "validation_fold": (fold + 1) % 5,
+                    "manifest": str(manifest.resolve()),
+                    "weights": str(weights.resolve()),
+                    "weights_sha256": _sha256(weights),
+                    "fold_policy": {
+                        "version": "bread-label-policy-v2",
+                        "confidence": 0.5,
+                        "margin": 0.2,
+                        "conservative_classes": [9, 10],
+                    },
+                }
+            )
+        valid = {
+            "schema_version": 2,
+            "evaluation_kind": "new_20_class_leakage_safe_5fold_oof",
+            "leakage_safe_oof": True,
+            "sample_count": 510,
+            "calibration_sample_count": 3740,
+            "policy_selection_source": "median_of_five_validation_fold_policies",
+            "folds": folds,
+        }
+        _validate_classifier_provenance(valid, classifier_root, catalog, split)
+        for field, value in (
+            ("schema_version", "2"),
+            ("leakage_safe_oof", 1),
+            ("sample_count", 510.0),
+            ("calibration_sample_count", "3740"),
+            ("policy_selection_source", "held_out"),
+            ("folds", [folds[0]]),
+        ):
+            with self.subTest(field=field):
+                malformed = dict(valid)
+                malformed[field] = value
+                with self.assertRaisesRegex(SelectionError, "provenance"):
+                    _validate_classifier_provenance(
+                        malformed, classifier_root, catalog, split
+                    )
+
+        mutations = (
+            lambda payload: payload["folds"][0].update({"extra": True}),
+            lambda payload: payload["folds"][0].pop("manifest"),
+            lambda payload: payload["folds"][0].update({"validation_fold": 4}),
+            lambda payload: payload["folds"][0].update({"fold": "0"}),
+            lambda payload: payload["folds"][0].update(
+                {"manifest": str((self.root / "outside.json").resolve())}
+            ),
+            lambda payload: payload["folds"][0].update(
+                {
+                    "manifest": str(
+                        (classifier_root / "missing-manifest.json").resolve()
+                    )
+                }
+            ),
+            lambda payload: payload["folds"][0].update(
+                {"weights_sha256": "0" * 64}
+            ),
+            lambda payload: payload["folds"][0]["fold_policy"].update(
+                {"confidence": True}
+            ),
+            lambda payload: payload["folds"][0]["fold_policy"].update(
+                {"version": "wrong"}
+            ),
+            lambda payload: payload["folds"][0]["fold_policy"].update(
+                {"conservative_classes": [10, 9]}
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                malformed = json.loads(json.dumps(valid))
+                mutate(malformed)
+                with self.assertRaisesRegex(SelectionError, "provenance"):
+                    _validate_classifier_provenance(
+                        malformed, classifier_root, catalog, split
+                    )
+
+        swapped = json.loads(json.dumps(valid))
+        swapped["folds"][0]["manifest"] = swapped["folds"][1]["manifest"]
+        swapped["folds"][0]["weights"] = swapped["folds"][1]["weights"]
+        swapped["folds"][0]["weights_sha256"] = swapped["folds"][1][
+            "weights_sha256"
+        ]
+        with self.assertRaisesRegex(SelectionError, "canonical"):
+            _validate_classifier_provenance(
+                swapped, classifier_root, catalog, split
+            )
+
+        first_manifest = Path(valid["folds"][0]["manifest"])
+        tampered = _fold_manifest_payload(0)
+        tampered["fold"] = 1
+        first_manifest.write_text(json.dumps(tampered), encoding="utf-8")
+        with self.assertRaisesRegex(SelectionError, "manifest identity"):
+            _validate_classifier_provenance(valid, classifier_root, catalog, split)
+
+    def test_classifier_deployment_path_is_content_addressed(self):
+        weights = self.root / "best.pt"
+        weights.write_bytes(b"first")
+        first = _classifier_deployment_path(self.root, weights)
+        self.assertEqual(
+            first.name,
+            f"bread_classifier_yolov8n_cls_v1_{_sha256(weights)}.pt",
+        )
+        weights.write_bytes(b"second")
+        second = _classifier_deployment_path(self.root, weights)
+        self.assertNotEqual(first, second)
+
+    def test_manifest_publish_audit_failure_preserves_previous_bytes(self):
+        manifest_path = REPOSITORY_ROOT / "models" / "bread_pipeline_manifest.json"
+        previous = manifest_path.read_bytes()
+
+        def fail_audit(_):
+            raise SelectionError("injected audit failure")
+
+        with self.assertRaisesRegex(SelectionError, "injected audit failure"):
+            _publish_manifest(
+                manifest_path,
+                build_manifest(self._selection()),
+                audit_fn=fail_audit,
+            )
+        self.assertEqual(manifest_path.read_bytes(), previous)
+        with self.assertRaises(TypeError):
+            _publish_manifest(manifest_path, {"notSerializable": object()})
+        self.assertEqual(manifest_path.read_bytes(), previous)
+        with patch(
+            "tools.bread_training.run_selection.os.replace",
+            side_effect=OSError("injected replace failure"),
+        ):
+            with self.assertRaisesRegex(OSError, "injected replace failure"):
+                _publish_manifest(
+                    manifest_path,
+                    build_manifest(self._selection()),
+                    audit_fn=lambda _: {
+                        "ok": True,
+                        "pipelineVersion": "bread-pipeline-v1",
+                        "verifierKind": "none",
+                    },
+                )
+        self.assertEqual(manifest_path.read_bytes(), previous)
+        with patch(
+            "tools.bread_training.run_selection.os.fsync",
+            side_effect=OSError("injected fsync failure"),
+        ):
+            with self.assertRaisesRegex(OSError, "injected fsync failure"):
+                _publish_manifest(manifest_path, build_manifest(self._selection()))
+        self.assertEqual(manifest_path.read_bytes(), previous)
+        self.assertFalse(
+            any(
+                item.name.startswith(".bread_pipeline_manifest.")
+                for item in manifest_path.parent.iterdir()
+            )
+        )
 
     def test_manifest_audit_rejects_paths_outside_manifest_directory(self):
         manifest_path = self.root / "bread_pipeline_manifest.json"
@@ -423,7 +687,16 @@ class RunSelectionTest(unittest.TestCase):
                 encoding="utf-8",
             )
             split = output / "split.json"
-            split.write_text("{}", encoding="utf-8")
+            split.write_text(
+                json.dumps(
+                    {
+                        "folds": 5,
+                        "mixed_assignments": {},
+                        "single_product_assignments": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
             detector = model_root / "bread_yolov8n_1class_tray_v0_2.pt"
             detector.write_bytes(b"detector")
             baseline_report = output / "baseline.json"
@@ -469,9 +742,55 @@ class RunSelectionTest(unittest.TestCase):
                 )
             classifier_root = output / "classifier"
             classifier_root.mkdir()
+            classifier_folds = []
+            for fold, epoch in enumerate((29, 20, 35, 21, 18)):
+                fold_root = classifier_root / f"fold_{fold}"
+                csv_path = fold_root / "train" / "results.csv"
+                weights = fold_root / "train" / "weights" / "best.pt"
+                manifest = fold_root / "fold_manifest.json"
+                weights.parent.mkdir(parents=True)
+                csv_path.write_text(
+                    "epoch,metrics/accuracy_top1\n" f"{epoch},0.99\n",
+                    encoding="utf-8",
+                )
+                weights.write_bytes(f"fold-{fold}".encode())
+                manifest_payload = _fold_manifest_payload(fold)
+                for key in (
+                    "held_out_mixed_keys",
+                    "validation_mixed_keys",
+                    "training_mixed_keys",
+                    "validation_single_keys",
+                    "training_single_keys",
+                ):
+                    manifest_payload[key] = []
+                manifest.write_text(
+                    json.dumps(manifest_payload), encoding="utf-8"
+                )
+                classifier_folds.append(
+                    {
+                        "fold": fold,
+                        "validation_fold": (fold + 1) % 5,
+                        "manifest": str(manifest.resolve()),
+                        "weights": str(weights.resolve()),
+                        "weights_sha256": _sha256(weights),
+                        "fold_policy": {
+                            "version": "bread-label-policy-v2",
+                            "confidence": 0.5,
+                            "margin": 0.2,
+                            "conservative_classes": [9, 10],
+                        },
+                    }
+                )
             (classifier_root / "classifier_report.json").write_text(
                 json.dumps(
                     {
+                        "schema_version": 2,
+                        "evaluation_kind": "new_20_class_leakage_safe_5fold_oof",
+                        "leakage_safe_oof": True,
+                        "sample_count": 510,
+                        "calibration_sample_count": 3740,
+                        "policy_selection_source": "median_of_five_validation_fold_policies",
+                        "folds": classifier_folds,
                         "policy": {
                             "version": "bread-label-policy-v2",
                             "confidence": 0.0,
@@ -487,13 +806,6 @@ class RunSelectionTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            for fold, epoch in enumerate((29, 20, 35, 21, 18)):
-                csv_path = classifier_root / f"fold_{fold}" / "train" / "results.csv"
-                csv_path.parent.mkdir(parents=True)
-                csv_path.write_text(
-                    "epoch,metrics/accuracy_top1\n" f"{epoch},0.99\n",
-                    encoding="utf-8",
-                )
             classifier = model_root / "bread_classifier_yolov8n_cls_v1.pt"
             classifier.write_bytes(b"classifier")
             config = SelectionConfig(
@@ -529,6 +841,85 @@ class RunSelectionTest(unittest.TestCase):
             )
             self.assertEqual(report["classifier"]["finalTrainingSamples"], 3740)
             self.assertEqual(report["classifier"]["oofClaimsSource"], "five_fold_weights_only")
+            manifest_bytes = config.manifest_path.read_bytes()
+            classifier_report_path = classifier_root / "classifier_report.json"
+            valid_classifier = json.loads(
+                classifier_report_path.read_text(encoding="utf-8")
+            )
+
+            def invoke_with_patches():
+                with patch(
+                    "tools.bread_training.run_selection._prepare_final_classifier",
+                    return_value=classifier,
+                ) as prepare_classifier, patch(
+                    "tools.bread_training.run_selection._guard_manifest_path",
+                    return_value=config.manifest_path.resolve(),
+                ):
+                    try:
+                        return run_selection(config, progress=lambda _: None)
+                    finally:
+                        prepare_classifier.assert_not_called()
+
+            malformed = dict(valid_classifier)
+            malformed["schema_version"] = "2"
+            classifier_report_path.write_text(json.dumps(malformed), encoding="utf-8")
+            with self.assertRaisesRegex(SelectionError, "provenance"):
+                invoke_with_patches()
+            self.assertEqual(config.manifest_path.read_bytes(), manifest_bytes)
+
+            wrong_policy = json.loads(json.dumps(valid_classifier))
+            wrong_policy["policy"]["version"] = "wrong"
+            classifier_report_path.write_text(
+                json.dumps(wrong_policy), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(SelectionError, "policyVersion"):
+                invoke_with_patches()
+            self.assertEqual(config.manifest_path.read_bytes(), manifest_bytes)
+
+            classifier_report_path.write_text(
+                json.dumps(valid_classifier), encoding="utf-8"
+            )
+            invalid_catalog = json.loads(catalog.read_text(encoding="utf-8"))
+            invalid_catalog["labels"][15]["name"] = "Wrong Campagne"
+            catalog.write_text(json.dumps(invalid_catalog), encoding="utf-8")
+            with self.assertRaisesRegex(SelectionError, "canonical ordered"):
+                invoke_with_patches()
+            self.assertEqual(config.manifest_path.read_bytes(), manifest_bytes)
+
+            catalog.write_text(
+                json.dumps(
+                    {
+                        "raw_root": str(raw_root),
+                        "labels": labels,
+                        "images": [],
+                        "annotations": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(audit_manifest_contract(config.manifest_path)["ok"])
+            replacement_source = output / "replacement-best.pt"
+            replacement_source.write_bytes(b"replacement-classifier")
+            replacement_classifier = _classifier_deployment_path(
+                model_root, replacement_source
+            )
+            replacement_classifier.write_bytes(replacement_source.read_bytes())
+            with patch(
+                "tools.bread_training.run_selection._prepare_final_classifier",
+                return_value=replacement_classifier,
+            ), patch(
+                "tools.bread_training.run_selection._guard_manifest_path",
+                return_value=config.manifest_path.resolve(),
+            ), patch(
+                "tools.bread_training.run_selection._publish_manifest",
+                side_effect=SelectionError("injected publication failure"),
+            ):
+                with self.assertRaisesRegex(
+                    SelectionError, "injected publication failure"
+                ):
+                    run_selection(config, progress=lambda _: None)
+            self.assertEqual(config.manifest_path.read_bytes(), manifest_bytes)
+            self.assertTrue(audit_manifest_contract(config.manifest_path)["ok"])
 
     def test_audit_cli_refuses_output_outside_repository_outputs(self):
         manifest = self.root / "bread_pipeline_manifest.json"

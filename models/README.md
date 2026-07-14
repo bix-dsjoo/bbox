@@ -5,10 +5,11 @@ package that manifest and the exact sibling files named and hashed by it:
 
 - `bread_yolov8n_1class_tray_v0_2.pt`: retained one-class bread detector. Both
   retrained candidates failed only the approved median-IoU adoption gate.
-- `bread_classifier_yolov8n_cls_v1.pt`: 20-class classifier trained for 21 fixed
-  epochs on all 3,230 single-product images and all 510 real mixed-scene GT
-  crops. Its manifest precision and coverage remain five-fold OOF claims, not
-  final-weight in-sample metrics.
+- `bread_classifier_yolov8n_cls_v1_<sha256>.pt`: content-addressed 20-class
+  classifier trained for 21 fixed epochs on all 3,230 single-product images and
+  all 510 real mixed-scene GT crops. The manifest is switched only after the new
+  sibling file and prospective contract pass validation. Its precision and
+  coverage remain five-fold OOF claims, not final-weight in-sample metrics.
 
 The approved verifier is `kind: none`, so no verifier weight belongs in the
 release. Synthetic data is omitted because there are no approved backgrounds;

@@ -27,7 +27,11 @@ from tools.bread_training.metrics import (
     detector_gate,
 )
 from tools.bread_training.split import load_catalog
-from tools.bread_training.train import _class_directory, _write_classifier_crop
+from tools.bread_training.train import (
+    _class_directory,
+    _write_classifier_crop,
+    build_classifier_fold_manifest,
+)
 from tools.bread_training.verifier import (
     VerifierDecision,
     VerifierMetrics,
@@ -38,7 +42,6 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CLASSIFIER_PRECISION_FLOOR = Decimal("0.94")
 PIPELINE_VERSION = "bread-pipeline-v1"
 SYNTHETIC_DISABLED_REASON = "no_approved_backgrounds"
-FINAL_CLASSIFIER_FILE = "bread_classifier_yolov8n_cls_v1.pt"
 CANONICAL_LABELS = (
     "Walnut Donut",
     "Croffle",
@@ -151,10 +154,9 @@ def _validate_catalog_sources(
 
 
 def _validate_probability(name: str, value: Any) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as error:
-        raise SelectionError(f"{name} must be numeric") from error
+    if type(value) not in (int, float):
+        raise SelectionError(f"{name} must be a JSON number")
+    number = float(value)
     if not math.isfinite(number) or not 0.0 <= number <= 1.0:
         raise SelectionError(f"{name} must be between 0 and 1")
     return number
@@ -313,9 +315,17 @@ def _classifier_manifest(
 
 
 def build_manifest(selection: SelectionReport) -> dict[str, Any]:
-    label_ids = [item[0] for item in selection.catalog.labels]
-    if label_ids != list(range(1, 21)):
-        raise SelectionError("labels must contain ordered IDs 1 through 20")
+    expected_labels = tuple(enumerate(CANONICAL_LABELS, start=1))
+    if (
+        selection.catalog.labels != expected_labels
+        or any(
+            type(category_id) is not int or not isinstance(name, str)
+            for category_id, name in selection.catalog.labels
+        )
+    ):
+        raise SelectionError("labels must match the canonical ordered IDs and names")
+    if selection.label_policy.version != "bread-label-policy-v2":
+        raise SelectionError("policyVersion must be bread-label-policy-v2")
     if selection.verifier.kind != "none":
         raise SelectionError("this approved pipeline requires verifier kind none")
     return {
@@ -383,7 +393,17 @@ def audit_manifest_contract(manifest_path: Path) -> dict[str, Any]:
         {"id": category_id, "name": name}
         for category_id, name in enumerate(CANONICAL_LABELS, start=1)
     ]
-    if labels != expected_labels:
+    if (
+        not isinstance(labels, list)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"id", "name"}
+            or type(item.get("id")) is not int
+            or not isinstance(item.get("name"), str)
+            for item in labels
+        )
+        or labels != expected_labels
+    ):
         raise SelectionError("labels must contain ordered IDs 1 through 20")
     expected_model_keys = {
         "detector": {"file", "sha256", "imgsz", "confidence", "iou"},
@@ -445,7 +465,23 @@ def audit_manifest_contract(manifest_path: Path) -> dict[str, Any]:
     }
     if verifier != expected_verifier:
         raise SelectionError("verifier kind none cannot reference files or thresholds")
-    if payload.get("quality") != {
+    quality = payload.get("quality")
+    if not isinstance(quality, dict) or set(quality) != {
+        "minBoxSize",
+        "maxAreaRatio",
+        "edgeMarginPx",
+        "duplicateIou",
+    }:
+        raise SelectionError("manifest quality fields do not match schema v1")
+    if type(quality.get("minBoxSize")) is not int or quality["minBoxSize"] != 45:
+        raise SelectionError("quality minBoxSize must be integer 45")
+    if type(quality.get("edgeMarginPx")) is not int or quality["edgeMarginPx"] != 2:
+        raise SelectionError("quality edgeMarginPx must be integer 2")
+    if type(quality.get("maxAreaRatio")) is not float or quality["maxAreaRatio"] != 0.38:
+        raise SelectionError("quality maxAreaRatio must be JSON float 0.38")
+    if type(quality.get("duplicateIou")) is not float or quality["duplicateIou"] != 0.95:
+        raise SelectionError("quality duplicateIou must be JSON float 0.95")
+    if quality != {
         "minBoxSize": 45,
         "maxAreaRatio": 0.38,
         "edgeMarginPx": 2,
@@ -459,6 +495,38 @@ def audit_manifest_contract(manifest_path: Path) -> dict[str, Any]:
     }
 
 
+def _publish_manifest(
+    manifest_path: Path,
+    payload: Mapping[str, Any],
+    audit_fn: Callable[[Path], dict[str, Any]] = audit_manifest_contract,
+) -> dict[str, Any]:
+    target = _guard_manifest_path(manifest_path)
+    serialized = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode(
+        "utf-8"
+    )
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=".bread_pipeline_manifest.",
+            suffix=".json",
+            dir=target.parent,
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(serialized)
+            stream.flush()
+            os.fsync(stream.fileno())
+        audit = audit_fn(temporary)
+        if audit.get("ok") is not True:
+            raise SelectionError("prospective manifest audit did not return ok=true")
+        os.replace(temporary, target)
+        temporary = None
+        return audit
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
 def _read_json(path: Path, description: str) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -467,6 +535,141 @@ def _read_json(path: Path, description: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise SelectionError(f"{description} must contain a JSON object")
     return payload
+
+
+def _validate_classifier_provenance(
+    payload: Mapping[str, Any],
+    classifier_root: Path,
+    catalog_payload: Mapping[str, Any],
+    split_payload: Mapping[str, Any],
+) -> None:
+    folds = payload.get("folds")
+    valid = (
+        type(payload.get("schema_version")) is int
+        and payload["schema_version"] == 2
+        and payload.get("evaluation_kind")
+        == "new_20_class_leakage_safe_5fold_oof"
+        and type(payload.get("leakage_safe_oof")) is bool
+        and payload["leakage_safe_oof"] is True
+        and type(payload.get("sample_count")) is int
+        and payload["sample_count"] == 510
+        and type(payload.get("calibration_sample_count")) is int
+        and payload["calibration_sample_count"] == 3740
+        and payload.get("policy_selection_source")
+        == "median_of_five_validation_fold_policies"
+        and isinstance(folds, list)
+        and len(folds) == 5
+    )
+    if not valid:
+        raise SelectionError("classifier provenance is not exact leakage-safe v2 OOF")
+    root = classifier_root.resolve()
+    expected_fold_keys = {
+        "fold",
+        "validation_fold",
+        "manifest",
+        "weights",
+        "weights_sha256",
+        "fold_policy",
+    }
+    expected_policy_keys = {
+        "version",
+        "confidence",
+        "margin",
+        "conservative_classes",
+    }
+    expected_manifest_keys = {
+        "schema_version",
+        "fold",
+        "validation_fold",
+        "held_out_mixed_keys",
+        "validation_mixed_keys",
+        "training_mixed_keys",
+        "validation_single_keys",
+        "training_single_keys",
+        "held_out_absent_from_train_val",
+        "class_directories",
+        "counts",
+        "sources",
+    }
+    for index, item in enumerate(folds):
+        if not isinstance(item, dict) or set(item) != expected_fold_keys:
+            raise SelectionError("classifier provenance fold fields are not exact")
+        if type(item["fold"]) is not int or item["fold"] != index:
+            raise SelectionError("classifier provenance fold order is invalid")
+        if (
+            type(item["validation_fold"]) is not int
+            or item["validation_fold"] != (index + 1) % 5
+        ):
+            raise SelectionError("classifier provenance validation fold is invalid")
+        if type(item["manifest"]) is not str or type(item["weights"]) is not str:
+            raise SelectionError("classifier provenance artifact paths must be strings")
+        manifest_path = Path(item["manifest"]).resolve()
+        weights_path = Path(item["weights"]).resolve()
+        expected_fold_root = root / f"fold_{index}"
+        if (
+            manifest_path != expected_fold_root / "fold_manifest.json"
+            or weights_path != expected_fold_root / "train" / "weights" / "best.pt"
+        ):
+            raise SelectionError(
+                "classifier provenance artifacts must use canonical fold paths"
+            )
+        if not manifest_path.is_file() or not weights_path.is_file():
+            raise SelectionError("classifier provenance artifacts are missing")
+        manifest_payload = _read_json(
+            manifest_path, f"classifier fold {index} manifest"
+        )
+        if set(manifest_payload) != expected_manifest_keys:
+            raise SelectionError("classifier provenance manifest fields are not exact")
+        try:
+            expected_identity = asdict(
+                build_classifier_fold_manifest(
+                    catalog_payload, split_payload, index
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise SelectionError(
+                "classifier provenance catalog/split contract is invalid"
+            ) from error
+        actual_identity = {
+            key: manifest_payload[key] for key in expected_identity
+        }
+        normalized_identity = {
+            key: list(value) if isinstance(value, tuple) else value
+            for key, value in expected_identity.items()
+        }
+        if (
+            type(manifest_payload["schema_version"]) is not int
+            or manifest_payload["schema_version"] != 1
+            or actual_identity != normalized_identity
+            or type(manifest_payload["held_out_absent_from_train_val"]) is not bool
+            or manifest_payload["held_out_absent_from_train_val"] is not True
+            or not isinstance(manifest_payload["class_directories"], dict)
+            or not isinstance(manifest_payload["counts"], dict)
+            or not isinstance(manifest_payload["sources"], list)
+        ):
+            raise SelectionError("classifier provenance manifest identity is invalid")
+        if (
+            type(item["weights_sha256"]) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", item["weights_sha256"])
+            or sha256_file(weights_path) != item["weights_sha256"]
+        ):
+            raise SelectionError("classifier provenance weights hash is invalid")
+        policy = item["fold_policy"]
+        if not isinstance(policy, dict) or set(policy) != expected_policy_keys:
+            raise SelectionError("classifier provenance fold policy fields are not exact")
+        if policy["version"] != "bread-label-policy-v2":
+            raise SelectionError("classifier provenance fold policy version is invalid")
+        _validate_probability("classifier provenance confidence", policy["confidence"])
+        _validate_probability("classifier provenance margin", policy["margin"])
+        classes = policy["conservative_classes"]
+        if (
+            not isinstance(classes, list)
+            or any(type(value) is not int or not 1 <= value <= 20 for value in classes)
+            or classes != sorted(set(classes))
+        ):
+            raise SelectionError(
+                "classifier provenance conservative classes are invalid"
+            )
 
 
 def _detector_report(payload: Mapping[str, Any]) -> DetectorReport:
@@ -732,6 +935,13 @@ def _publish_model(source: Path, destination: Path) -> Path:
     return destination.resolve()
 
 
+def _classifier_deployment_path(model_root: Path, weights: Path) -> Path:
+    return (
+        model_root.resolve()
+        / f"bread_classifier_yolov8n_cls_v1_{sha256_file(weights)}.pt"
+    )
+
+
 def _prepare_final_classifier(
     config: SelectionConfig,
     catalog_payload: Mapping[str, Any],
@@ -789,9 +999,10 @@ def _prepare_final_classifier(
         progress(f"classifier phase=train-final-complete sha256={sha256_file(trained)}")
     else:
         progress(f"classifier phase=reuse-final sha256={sha256_file(trained)}")
-    return _publish_model(
-        trained, config.manifest_path.resolve().parent / FINAL_CLASSIFIER_FILE
+    destination = _classifier_deployment_path(
+        config.manifest_path.resolve().parent, trained
     )
+    return _publish_model(trained, destination)
 
 
 def _prepare_selected_detector(
@@ -873,8 +1084,8 @@ def run_selection(
     catalog = load_catalog(config.catalog_path)
     if Path(catalog.raw_root).resolve() != config.raw_root.resolve():
         raise SelectionError("raw root must match the catalog raw_root")
-    if [item[0] for item in catalog.labels] != list(range(1, 21)):
-        raise SelectionError("catalog labels must contain ordered IDs 1 through 20")
+    if catalog.labels != tuple(enumerate(CANONICAL_LABELS, start=1)):
+        raise SelectionError("catalog labels must match canonical ordered IDs and names")
     catalog_payload = _read_json(config.catalog_path, "bread catalog")
     _validate_catalog_sources(catalog_payload, config.raw_root)
     baseline = _load_baseline(config.baseline_detector_report)
@@ -891,6 +1102,13 @@ def run_selection(
     classifier_payload = _read_json(
         config.classifier_root / "classifier_report.json", "classifier OOF report"
     )
+    split_payload = _read_json(config.split_path, "bread split")
+    _validate_classifier_provenance(
+        classifier_payload,
+        config.classifier_root,
+        catalog_payload,
+        split_payload,
+    )
     policy_payload = classifier_payload.get("policy")
     deployment_report = classifier_payload.get("deployment_policy_report")
     if not isinstance(policy_payload, dict) or not isinstance(deployment_report, dict):
@@ -903,6 +1121,8 @@ def run_selection(
             int(item) for item in policy_payload["conservative_classes"]
         ),
     )
+    if label_policy.version != "bread-label-policy-v2":
+        raise SelectionError("policyVersion must be bread-label-policy-v2")
     if Decimal(str(deployment_report["precision"])) < CLASSIFIER_PRECISION_FLOOR:
         raise SelectionError(
             "classifier deployment precision is below the approved 0.94 floor"
@@ -935,8 +1155,7 @@ def run_selection(
         synthetic_disabled_reason=SYNTHETIC_DISABLED_REASON,
     )
     manifest = build_manifest(selection)
-    _write_json_atomic(manifest_path, manifest)
-    audit = audit_manifest_contract(config.manifest_path)
+    audit = _publish_manifest(manifest_path, manifest)
     output_root.mkdir(parents=True, exist_ok=True)
     _write_json_atomic(
         output_root / "selection_report.json",
