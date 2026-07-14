@@ -64,7 +64,7 @@ class DetectorTrainingTest(unittest.TestCase):
 
         self.assertIsInstance(caught.exception.__cause__, OSError)
 
-    def test_train_adapter_imports_ultralytics_lazily_and_uses_determinism(self):
+    def test_train_adapter_imports_ultralytics_lazily_and_uses_gpu_determinism(self):
         calls = []
 
         class FakeYOLO:
@@ -96,11 +96,16 @@ class DetectorTrainingTest(unittest.TestCase):
                 {
                     "data": str(config.dataset_yaml),
                     "imgsz": 640,
-                    "device": "cpu",
+                    "device": 0,
                     "seed": 17,
                     "deterministic": True,
+                    "workers": 0,
+                    "batch": 16,
+                    "epochs": 100,
+                    "patience": 20,
                     "project": str(config.output_root),
                     "name": "fold-2",
+                    "exist_ok": True,
                 },
             ),
         )

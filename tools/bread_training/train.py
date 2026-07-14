@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -10,7 +11,7 @@ import os
 import shutil
 import statistics
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -33,6 +34,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 AP_CONFIDENCE_FLOOR = 0.001
 DEFAULT_THRESHOLD_CANDIDATES = tuple(value / 100 for value in range(5, 100, 5))
 DEFAULT_CLASSIFIER_INITIAL_WEIGHTS = Path("yolov8n-cls.pt")
+DETECTOR_CANDIDATE_EVALUATOR_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,56 @@ class DetectorTrainConfig:
     seed: int
     output_root: Path
     run_name: str
+    epochs: int = 100
+    patience: int = 20
+    batch: int = 16
+    device: int | str = 0
+
+
+@dataclass(frozen=True)
+class DetectorCandidateConfig:
+    name: str
+    initial_weights: Path
+    fold_dataset_root: Path
+    output_root: Path
+    seed: int = 20260714
+    epochs: int = 100
+    patience: int = 20
+    batch: int = 16
+    device: int | str = 0
+    synthetic_ratio: float = 0.0
+
+
+@dataclass(frozen=True)
+class DetectorCandidateReport:
+    name: str
+    fold_artifacts: tuple[dict[str, Any], ...]
+    report: DetectorReport
+    median_latency_ms: float
+    best_epochs: tuple[int, ...]
+
+    @property
+    def fold_predictions(self) -> tuple[dict[str, Any], ...]:
+        return self.fold_artifacts
+
+
+def detector_candidate_matrix(
+    current_weights: Path, fold_dataset_root: Path, output_root: Path
+) -> tuple[DetectorCandidateConfig, DetectorCandidateConfig]:
+    return (
+        DetectorCandidateConfig(
+            name="current_finetune_real",
+            initial_weights=current_weights,
+            fold_dataset_root=fold_dataset_root,
+            output_root=output_root / "current_finetune_real",
+        ),
+        DetectorCandidateConfig(
+            name="coco_yolov8n_real",
+            initial_weights=Path("yolov8n.pt"),
+            fold_dataset_root=fold_dataset_root,
+            output_root=output_root / "coco_yolov8n_real",
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -152,17 +204,24 @@ def _yolo_class() -> Any:
     return YOLO
 
 
-def train_detector_fold(config: DetectorTrainConfig) -> Path:
-    YOLO = _yolo_class()
+def train_detector_fold(
+    config: DetectorTrainConfig, yolo_factory: Callable[[str], Any] | None = None
+) -> Path:
+    YOLO = yolo_factory or _yolo_class()
     model = YOLO(str(config.initial_weights))
     result = model.train(
         data=str(config.dataset_yaml),
         imgsz=640,
-        device="cpu",
+        device=config.device,
         seed=config.seed,
         deterministic=True,
+        workers=0,
+        batch=config.batch,
+        epochs=config.epochs,
+        patience=config.patience,
         project=str(config.output_root),
         name=config.run_name,
+        exist_ok=True,
     )
     return Path(result.save_dir) / "weights" / "best.pt"
 
@@ -1181,10 +1240,16 @@ def evaluate_detector_fold(
 
 
 class _UltralyticsPredictor:
-    def __init__(self, weights: Path, paths_by_key: Mapping[str, Path]):
+    def __init__(
+        self,
+        weights: Path,
+        paths_by_key: Mapping[str, Path],
+        device: int | str = 0,
+    ):
         YOLO = _yolo_class()
         self._model = YOLO(str(weights))
         self._paths_by_key = paths_by_key
+        self._device = device
 
     def __call__(
         self, image_keys: Sequence[str], confidence: float
@@ -1196,7 +1261,7 @@ class _UltralyticsPredictor:
             source=paths,
             conf=max(confidence, AP_CONFIDENCE_FLOOR),
             imgsz=640,
-            device="cpu",
+            device=self._device,
             verbose=False,
             stream=False,
         )
@@ -1214,6 +1279,302 @@ class _UltralyticsPredictor:
                 )
             predictions[image_key] = tuple(image_predictions)
         return predictions
+
+
+def _candidate_fold_manifest(dataset_root: Path, fold: int) -> dict[str, Any]:
+    manifest_path = dataset_root / "source_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Detector fold manifest does not exist: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("dataset_kind") != "fold" or manifest.get("heldout_fold") != fold:
+        raise ValueError(f"Detector fold manifest identity mismatch: {manifest_path}")
+    splits = manifest.get("splits")
+    if not isinstance(splits, dict) or set(splits) != {"train", "validation", "test"}:
+        raise ValueError(f"Detector fold manifest has invalid splits: {manifest_path}")
+    for split_name, records in splits.items():
+        if not isinstance(records, list):
+            raise ValueError(f"Detector fold manifest split is invalid: {split_name}")
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("Detector fold manifest record is invalid")
+            if record.get("synthetic") or record.get("source_kind") == "synthetic":
+                raise ValueError("Detector candidates must not contain synthetic records")
+            for field in ("image_key", "output_image", "output_label"):
+                if not isinstance(record.get(field), str) or not record[field]:
+                    raise ValueError(f"Detector fold record is missing {field}")
+    return manifest
+
+
+def _dataset_record_path(dataset_root: Path, relative_value: str) -> Path:
+    path = (dataset_root / Path(relative_value)).resolve()
+    try:
+        path.relative_to(dataset_root.resolve())
+    except ValueError as error:
+        raise ValueError("Detector fold manifest path escapes its dataset") from error
+    return path
+
+
+def _candidate_split_paths(
+    dataset_root: Path, manifest: Mapping[str, Any], split: str
+) -> dict[str, Path]:
+    paths = {
+        str(record["image_key"]): _dataset_record_path(
+            dataset_root, str(record["output_image"])
+        )
+        for record in manifest["splits"][split]
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Generated detector image does not exist: {missing[0]}")
+    return paths
+
+
+def _load_candidate_ground_truth(
+    dataset_root: Path, split: str
+) -> dict[str, tuple[BBox, ...]]:
+    try:
+        from PIL import Image, ImageOps
+    except (ImportError, OSError) as error:
+        raise RuntimeError("Pillow is required for detector candidate evaluation") from error
+    manifest = _candidate_fold_manifest(
+        dataset_root, int(dataset_root.name.removeprefix("fold_"))
+    )
+    ground_truth: dict[str, tuple[BBox, ...]] = {}
+    for record in manifest["splits"][split]:
+        image_path = _dataset_record_path(dataset_root, record["output_image"])
+        label_path = _dataset_record_path(dataset_root, record["output_label"])
+        with Image.open(image_path) as image:
+            width, height = ImageOps.exif_transpose(image).size
+        boxes: list[BBox] = []
+        if label_path.is_file():
+            for line in label_path.read_text(encoding="utf-8").splitlines():
+                values = line.split()
+                if len(values) != 5 or values[0] != "0":
+                    raise ValueError(f"Invalid one-class YOLO label: {label_path}")
+                _, center_x, center_y, box_width, box_height = map(float, values)
+                pixel_width = box_width * width
+                pixel_height = box_height * height
+                boxes.append(
+                    (
+                        center_x * width - pixel_width / 2,
+                        center_y * height - pixel_height / 2,
+                        pixel_width,
+                        pixel_height,
+                    )
+                )
+        ground_truth[str(record["image_key"])] = tuple(boxes)
+    return ground_truth
+
+
+def _best_epoch(run_root: Path) -> int:
+    results_path = run_root / "results.csv"
+    if not results_path.is_file():
+        return 0
+    with results_path.open("r", encoding="utf-8", newline="") as source:
+        rows = list(csv.DictReader(source))
+    if not rows:
+        return 0
+    normalized = [
+        {str(key).strip(): str(value).strip() for key, value in row.items()}
+        for row in rows
+    ]
+    map50 = "metrics/mAP50(B)"
+    map50_95 = "metrics/mAP50-95(B)"
+    if all(map50 in row and map50_95 in row for row in normalized):
+        selected = max(
+            normalized,
+            key=lambda row: (
+                0.1 * float(row[map50]) + 0.9 * float(row[map50_95]),
+                -int(float(row["epoch"])),
+            ),
+        )
+    else:
+        selected = normalized[-1]
+    return int(float(selected["epoch"]))
+
+
+def _detector_report_from_payload(payload: Mapping[str, Any]) -> DetectorReport:
+    return DetectorReport(**{key: float(value) for key, value in payload.items()})
+
+
+def run_detector_candidate_oof(
+    config: DetectorCandidateConfig,
+    *,
+    train_fold: Callable[[DetectorTrainConfig], Path] = train_detector_fold,
+    predictor_factory: Callable[..., Any] = _UltralyticsPredictor,
+    ground_truth_loader: Callable[
+        [Path, str], Mapping[str, Sequence[BBox]]
+    ] = _load_candidate_ground_truth,
+    progress: Callable[[str], None] | None = print,
+) -> DetectorCandidateReport:
+    if config.synthetic_ratio != 0:
+        raise ValueError("Detector candidate synthetic_ratio must be zero")
+    if config.epochs <= 0 or config.patience < 0 or config.batch <= 0:
+        raise ValueError("Detector candidate training settings are invalid")
+    fold_manifests = []
+    heldout_keys: set[str] = set()
+    for fold in range(5):
+        dataset_root = config.fold_dataset_root / f"fold_{fold}"
+        manifest = _candidate_fold_manifest(dataset_root, fold)
+        current_keys = {
+            str(record["image_key"]) for record in manifest["splits"]["test"]
+        }
+        if heldout_keys & current_keys:
+            raise ValueError("Detector held-out images must be unique across folds")
+        heldout_keys.update(current_keys)
+        fold_manifests.append((dataset_root, manifest))
+
+    config.output_root.mkdir(parents=True, exist_ok=True)
+    fold_payloads: list[dict[str, Any]] = []
+    fold_reports: list[DetectorReport] = []
+    best_epochs: list[int] = []
+    latencies: list[float] = []
+    for fold, (dataset_root, manifest) in enumerate(fold_manifests):
+        manifest_path = dataset_root / "source_manifest.json"
+        manifest_hash = _sha256_file(manifest_path)
+        run_name = f"fold_{fold}"
+        run_root = config.output_root / run_name
+        weights = run_root / "weights" / "best.pt"
+        completion_path = run_root / "candidate_training.json"
+        completion = {
+            "schema_version": 1,
+            "candidate": config.name,
+            "fold": fold,
+            "initial_weights": str(config.initial_weights),
+            "dataset_manifest_sha256": manifest_hash,
+            "seed": config.seed,
+            "epochs": config.epochs,
+            "patience": config.patience,
+            "batch": config.batch,
+            "device": config.device,
+            "synthetic_ratio": config.synthetic_ratio,
+        }
+        reusable = False
+        if weights.is_file() and completion_path.is_file():
+            reusable = json.loads(completion_path.read_text(encoding="utf-8")) == completion
+        if not reusable:
+            if progress:
+                progress(f"candidate={config.name} fold={fold} phase=train")
+            weights = train_fold(
+                DetectorTrainConfig(
+                    initial_weights=config.initial_weights,
+                    dataset_yaml=dataset_root / "dataset.yaml",
+                    seed=config.seed,
+                    output_root=config.output_root,
+                    run_name=run_name,
+                    epochs=config.epochs,
+                    patience=config.patience,
+                    batch=config.batch,
+                    device=config.device,
+                )
+            )
+            if not weights.is_file():
+                raise FileNotFoundError(f"Trained detector weights do not exist: {weights}")
+            completion_path.parent.mkdir(parents=True, exist_ok=True)
+            completion_path.write_text(
+                json.dumps(completion, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        elif progress:
+            progress(f"candidate={config.name} fold={fold} phase=reuse-trained")
+
+        validation_paths = _candidate_split_paths(dataset_root, manifest, "validation")
+        test_paths = _candidate_split_paths(dataset_root, manifest, "test")
+        predictor = predictor_factory(
+            weights, {**validation_paths, **test_paths}, device=config.device
+        )
+        ground_truth = {
+            **ground_truth_loader(dataset_root, "validation"),
+            **ground_truth_loader(dataset_root, "test"),
+        }
+        artifact_path = config.output_root / f"fold_{fold}_predictions.json"
+        model_hash = _sha256_file(weights)
+        artifact_reusable = False
+        if reusable and artifact_path.is_file():
+            existing = json.loads(artifact_path.read_text(encoding="utf-8"))
+            artifact_reusable = (
+                existing.get("evaluator_version")
+                == DETECTOR_CANDIDATE_EVALUATOR_VERSION
+                and existing.get("model_sha256") == model_hash
+                and existing.get("dataset_manifest_sha256") == manifest_hash
+            )
+        if not artifact_reusable:
+            if progress:
+                progress(f"candidate={config.name} fold={fold} phase=evaluate")
+            fold_latency: dict[str, float] = {}
+            evaluate_detector_fold(
+                fold=fold,
+                validation_keys=tuple(validation_paths),
+                held_out_keys=tuple(test_paths),
+                ground_truth=ground_truth,
+                predict=predictor,
+                artifact_path=artifact_path,
+                latency_records=fold_latency,
+            )
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            payload.update(
+                {
+                    "candidate": config.name,
+                    "evaluator_version": DETECTOR_CANDIDATE_EVALUATOR_VERSION,
+                    "model": str(weights.resolve()),
+                    "model_sha256": model_hash,
+                    "dataset_manifest": str(manifest_path.resolve()),
+                    "dataset_manifest_sha256": manifest_hash,
+                    "threshold_selected_from_split": "validation",
+                    "synthetic_record_count": 0,
+                    "best_epoch": _best_epoch(run_root),
+                }
+            )
+            artifact_path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        else:
+            payload = existing
+            if progress:
+                progress(f"candidate={config.name} fold={fold} phase=reuse-evaluation")
+        report = _detector_report_from_payload(payload["metrics"])
+        fold_payloads.append(payload)
+        fold_reports.append(report)
+        best_epochs.append(int(payload["best_epoch"]))
+        latencies.extend(float(image["latency_ms"]) for image in payload["images"])
+        if progress:
+            progress(f"candidate={config.name} fold={fold} phase=complete")
+
+    aggregate = detector_report(fold_reports)
+    median_latency = statistics.median(latencies) if latencies else 0.0
+    report_payload = {
+        "schema_version": 1,
+        "candidate": config.name,
+        "aggregation": "paired_fold_mean",
+        "ap_confidence_floor": AP_CONFIDENCE_FLOOR,
+        "synthetic_ratio": config.synthetic_ratio,
+        "heldout_image_count": len(heldout_keys),
+        "best_epochs": best_epochs,
+        "folds": [
+            {
+                "fold": fold,
+                "metrics": payload["metrics"],
+                "confidence_threshold": payload["confidence_threshold"],
+                "model_sha256": payload["model_sha256"],
+                "dataset_manifest_sha256": payload["dataset_manifest_sha256"],
+            }
+            for fold, payload in enumerate(fold_payloads)
+        ],
+        "metrics": asdict(aggregate),
+        "median_latency_ms": median_latency,
+    }
+    (config.output_root / "candidate_report.json").write_text(
+        json.dumps(report_payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return DetectorCandidateReport(
+        name=config.name,
+        fold_artifacts=tuple(fold_payloads),
+        report=aggregate,
+        median_latency_ms=median_latency,
+        best_epochs=tuple(best_epochs),
+    )
 
 
 def _load_oof_inputs(
@@ -1327,6 +1688,25 @@ def run_detector_oof(
     return report_path
 
 
+def _validate_candidate_cli_inputs(
+    catalog_path: Path, split_path: Path, fold_dataset_root: Path
+) -> None:
+    _, _, assignments, folds = _load_oof_inputs(catalog_path, split_path)
+    if folds != 5:
+        raise ValueError("Detector candidate OOF requires exactly five folds")
+    observed: dict[str, int] = {}
+    for fold in range(folds):
+        dataset_root = fold_dataset_root / f"fold_{fold}"
+        manifest = _candidate_fold_manifest(dataset_root, fold)
+        for record in manifest["splits"]["test"]:
+            key = str(record["image_key"])
+            if key in observed:
+                raise ValueError("Detector held-out images must be unique across folds")
+            observed[key] = fold
+    if observed != assignments:
+        raise ValueError("Detector fold manifests do not match the declared split")
+
+
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1335,6 +1715,13 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     detector_oof.add_argument("--split", required=True, type=Path)
     detector_oof.add_argument("--baseline", required=True, type=Path)
     detector_oof.add_argument("--output", required=True, type=Path)
+    candidate_oof = commands.add_parser("detector-candidate-oof")
+    candidate_oof.add_argument("--catalog", required=True, type=Path)
+    candidate_oof.add_argument("--split", required=True, type=Path)
+    candidate_oof.add_argument("--datasets", required=True, type=Path)
+    candidate_oof.add_argument("--current", required=True, type=Path)
+    candidate_oof.add_argument("--output", required=True, type=Path)
+    candidate_oof.add_argument("--probe-epochs", type=int)
     classifier_oof = commands.add_parser("classifier-oof")
     classifier_oof.add_argument("--catalog", required=True, type=Path)
     classifier_oof.add_argument("--split", required=True, type=Path)
@@ -1355,6 +1742,29 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.catalog, args.split, args.baseline, args.output
         )
         print(f"report={report_path}")
+        return 0
+    if args.command == "detector-candidate-oof":
+        if not args.current.is_file():
+            raise FileNotFoundError(f"Current detector weights do not exist: {args.current}")
+        if args.probe_epochs is not None and args.probe_epochs <= 0:
+            raise ValueError("probe-epochs must be positive")
+        _validate_candidate_cli_inputs(args.catalog, args.split, args.datasets)
+        output_root = _guard_output_root(args.output)
+        if args.probe_epochs is not None:
+            output_root = output_root / f"_probe_{args.probe_epochs}_epoch"
+        configs = detector_candidate_matrix(args.current, args.datasets, output_root)
+        started = time.perf_counter()
+        for config in configs:
+            if args.probe_epochs is not None:
+                config = replace(config, epochs=args.probe_epochs)
+            candidate_started = time.perf_counter()
+            report = run_detector_candidate_oof(config)
+            elapsed = time.perf_counter() - candidate_started
+            print(
+                f"candidate={report.name} elapsed_seconds={elapsed:.3f} "
+                f"median_latency_ms={report.median_latency_ms:.3f}"
+            )
+        print(f"total_elapsed_seconds={time.perf_counter() - started:.3f}")
         return 0
     if args.command == "classifier-oof":
         report_path = run_classifier_oof(
