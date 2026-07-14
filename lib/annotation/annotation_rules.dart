@@ -197,7 +197,15 @@ class AnnotationRules {
         if (box.id == boxId)
           () {
             found = true;
-            return box.copyWith(status: BoxStatus.labeled, labelId: labelId);
+            return box.copyWith(
+              status: BoxStatus.labeled,
+              labelId: labelId,
+              labelSource: LabelSource.user,
+              automation: box.automation?.copyWith(
+                suggestedLabelId: null,
+                reviewReasons: const [],
+              ),
+            );
           }()
         else
           box,
@@ -208,6 +216,21 @@ class AnnotationRules {
     return image.copyWith(boxes: boxes);
   }
 
+  static AnnotatedImage acceptSuggestedLabel(
+    AnnotatedImage image, {
+    required String boxId,
+  }) {
+    final matches = image.boxes.where((box) => box.id == boxId);
+    if (matches.isEmpty) {
+      throw AnnotationValidationException('Box not found: $boxId');
+    }
+    final suggestion = matches.single.automation?.suggestedLabelId;
+    if (suggestion == null || !matches.single.requiresLabelReview) {
+      throw AnnotationValidationException('Box has no reviewable suggestion.');
+    }
+    return assignLabel(image, boxId: boxId, labelId: suggestion);
+  }
+
   static AnnotatedImage deleteBox(
     AnnotatedImage image, {
     required String boxId,
@@ -216,7 +239,12 @@ class AnnotationRules {
       boxes: [
         for (final box in image.boxes)
           if (box.id == boxId)
-            box.copyWith(status: BoxStatus.deleted, labelId: null)
+            box.copyWith(
+              status: BoxStatus.deleted,
+              labelId: null,
+              labelSource: null,
+              automation: null,
+            )
           else
             box,
       ],

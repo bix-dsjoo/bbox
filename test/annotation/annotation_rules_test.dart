@@ -311,6 +311,49 @@ void main() {
 
       expect(updated.boxes.single.status, BoxStatus.labeled);
       expect(updated.boxes.single.labelId, 7);
+      expect(updated.boxes.single.labelSource, LabelSource.user);
+    });
+
+    test('accepting a suggestion creates a user-approved real label', () {
+      const image = AnnotatedImage(
+        id: 1,
+        sourcePath: 'a.jpg',
+        displayName: 'a.jpg',
+        width: 100,
+        height: 80,
+        status: ImageStatus.needsReview,
+        boxes: [
+          BoundingBox(
+            id: 'review-1',
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 20,
+            status: BoxStatus.proposal,
+            automation: BoxAutomationMetadata(
+              suggestedLabelId: 3,
+              candidates: [LabelCandidate(labelId: 3, score: 0.7)],
+              reviewReasons: ['classifier_ambiguous'],
+              pipelineVersion: 'bread-pipeline-v1',
+              policyVersion: 'bread-label-policy-v2',
+              detectorSha256: 'detector-hash',
+            ),
+          ),
+        ],
+      );
+
+      final updated = AnnotationRules.acceptSuggestedLabel(
+        image,
+        boxId: 'review-1',
+      );
+      final box = updated.boxes.single;
+
+      expect(box.status, BoxStatus.labeled);
+      expect(box.labelId, 3);
+      expect(box.labelSource, LabelSource.user);
+      expect(box.requiresLabelReview, isFalse);
+      expect(box.automation?.suggestedLabelId, isNull);
+      expect(box.automation?.reviewReasons, isEmpty);
     });
   });
 }

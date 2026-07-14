@@ -12,6 +12,8 @@ enum ImageStatus { queued, detecting, needsReview, confirmed, error }
 
 enum BoxStatus { proposal, labeled, deleted }
 
+enum LabelSource { auto, user }
+
 String _enumName(Object value) => value.toString().split('.').last;
 
 T _enumValue<T>(Iterable<T> values, String name, T fallback) {
@@ -21,6 +23,99 @@ T _enumValue<T>(Iterable<T> values, String name, T fallback) {
     }
   }
   return fallback;
+}
+
+class LabelCandidate {
+  const LabelCandidate({required this.labelId, required this.score});
+
+  final int labelId;
+  final double score;
+
+  Map<String, Object?> toJson() => {'labelId': labelId, 'score': score};
+
+  factory LabelCandidate.fromJson(Map<String, Object?> json) {
+    return LabelCandidate(
+      labelId: json['labelId'] as int,
+      score: (json['score'] as num).toDouble(),
+    );
+  }
+}
+
+class BoxAutomationMetadata {
+  const BoxAutomationMetadata({
+    this.suggestedLabelId,
+    this.candidates = const [],
+    this.reviewReasons = const [],
+    required this.pipelineVersion,
+    required this.policyVersion,
+    required this.detectorSha256,
+    this.classifierSha256,
+    this.verifierSha256,
+    this.embeddingUsed = false,
+  });
+
+  final int? suggestedLabelId;
+  final List<LabelCandidate> candidates;
+  final List<String> reviewReasons;
+  final String pipelineVersion;
+  final String policyVersion;
+  final String detectorSha256;
+  final String? classifierSha256;
+  final String? verifierSha256;
+  final bool embeddingUsed;
+
+  BoxAutomationMetadata copyWith({
+    Object? suggestedLabelId = _unchanged,
+    List<LabelCandidate>? candidates,
+    List<String>? reviewReasons,
+  }) {
+    return BoxAutomationMetadata(
+      suggestedLabelId: identical(suggestedLabelId, _unchanged)
+          ? this.suggestedLabelId
+          : suggestedLabelId as int?,
+      candidates: candidates ?? this.candidates,
+      reviewReasons: reviewReasons ?? this.reviewReasons,
+      pipelineVersion: pipelineVersion,
+      policyVersion: policyVersion,
+      detectorSha256: detectorSha256,
+      classifierSha256: classifierSha256,
+      verifierSha256: verifierSha256,
+      embeddingUsed: embeddingUsed,
+    );
+  }
+
+  Map<String, Object?> toJson() {
+    return {
+      'suggestedLabelId': suggestedLabelId,
+      'candidates': candidates.map((candidate) => candidate.toJson()).toList(),
+      'reviewReasons': reviewReasons,
+      'pipelineVersion': pipelineVersion,
+      'policyVersion': policyVersion,
+      'detectorSha256': detectorSha256,
+      'classifierSha256': classifierSha256,
+      'verifierSha256': verifierSha256,
+      'embeddingUsed': embeddingUsed,
+    };
+  }
+
+  factory BoxAutomationMetadata.fromJson(Map<String, Object?> json) {
+    final candidates = json['candidates'] as List<Object?>? ?? const [];
+    final reasons = json['reviewReasons'] as List<Object?>? ?? const [];
+    return BoxAutomationMetadata(
+      suggestedLabelId: json['suggestedLabelId'] as int?,
+      candidates: candidates
+          .cast<Map<String, Object?>>()
+          .map(LabelCandidate.fromJson)
+          .toList(growable: false),
+      reviewReasons: reasons.cast<String>().toList(growable: false),
+      pipelineVersion: json['pipelineVersion'] as String,
+      policyVersion: json['policyVersion'] as String,
+      detectorSha256: json['detectorSha256'] as String,
+      classifierSha256: json['classifierSha256'] as String?,
+      verifierSha256: json['verifierSha256'] as String?,
+      embeddingUsed: json['embeddingUsed'] as bool? ?? false,
+    );
+  }
 }
 
 class LabelClass {
@@ -86,6 +181,8 @@ class BoundingBox {
     required this.height,
     required this.status,
     this.labelId,
+    this.labelSource,
+    this.automation,
     this.confidence,
   });
 
@@ -96,11 +193,26 @@ class BoundingBox {
   final double height;
   final BoxStatus status;
   final int? labelId;
+  final LabelSource? labelSource;
+  final BoxAutomationMetadata? automation;
   final double? confidence;
 
   double get area => width * height;
 
   bool get isDeleted => status == BoxStatus.deleted;
+
+  bool get requiresLabelReview =>
+      status == BoxStatus.proposal &&
+      labelId == null &&
+      automation?.suggestedLabelId != null &&
+      automation!.reviewReasons.isNotEmpty;
+
+  bool get isAutoLabeled =>
+      status == BoxStatus.labeled &&
+      labelId != null &&
+      labelSource == LabelSource.auto;
+
+  int? get displayLabelId => labelId ?? automation?.suggestedLabelId;
 
   BoundingBox copyWith({
     String? id,
@@ -110,6 +222,8 @@ class BoundingBox {
     double? height,
     BoxStatus? status,
     Object? labelId = _unchanged,
+    Object? labelSource = _unchanged,
+    Object? automation = _unchanged,
     Object? confidence = _unchanged,
   }) {
     return BoundingBox(
@@ -120,6 +234,12 @@ class BoundingBox {
       height: height ?? this.height,
       status: status ?? this.status,
       labelId: identical(labelId, _unchanged) ? this.labelId : labelId as int?,
+      labelSource: identical(labelSource, _unchanged)
+          ? this.labelSource
+          : labelSource as LabelSource?,
+      automation: identical(automation, _unchanged)
+          ? this.automation
+          : automation as BoxAutomationMetadata?,
       confidence: identical(confidence, _unchanged)
           ? this.confidence
           : confidence as double?,
@@ -135,6 +255,8 @@ class BoundingBox {
       'height': height,
       'status': _enumName(status),
       'labelId': labelId,
+      'labelSource': labelSource == null ? null : _enumName(labelSource!),
+      'automation': automation?.toJson(),
       'confidence': confidence,
     };
   }
@@ -152,6 +274,18 @@ class BoundingBox {
         BoxStatus.proposal,
       ),
       labelId: json['labelId'] as int?,
+      labelSource: json['labelSource'] == null
+          ? null
+          : _enumValue(
+              LabelSource.values,
+              json['labelSource'] as String,
+              LabelSource.user,
+            ),
+      automation: json['automation'] == null
+          ? null
+          : BoxAutomationMetadata.fromJson(
+              json['automation'] as Map<String, Object?>,
+            ),
       confidence: (json['confidence'] as num?)?.toDouble(),
     );
   }
@@ -167,6 +301,7 @@ class AnnotatedImage {
     required this.height,
     required this.status,
     this.boxes = const [],
+    this.contentSha256,
     this.errorMessage,
   });
 
@@ -178,6 +313,7 @@ class AnnotatedImage {
   final int height;
   final ImageStatus status;
   final List<BoundingBox> boxes;
+  final String? contentSha256;
   final String? errorMessage;
 
   Iterable<BoundingBox> get visibleBoxes =>
@@ -201,6 +337,7 @@ class AnnotatedImage {
     int? height,
     ImageStatus? status,
     List<BoundingBox>? boxes,
+    Object? contentSha256 = _unchanged,
     Object? importedFrom = _unchanged,
     Object? errorMessage = _unchanged,
   }) {
@@ -215,6 +352,9 @@ class AnnotatedImage {
       height: height ?? this.height,
       status: status ?? this.status,
       boxes: boxes ?? this.boxes,
+      contentSha256: identical(contentSha256, _unchanged)
+          ? this.contentSha256
+          : contentSha256 as String?,
       errorMessage: identical(errorMessage, _unchanged)
           ? this.errorMessage
           : errorMessage as String?,
@@ -231,6 +371,7 @@ class AnnotatedImage {
       'height': height,
       'status': _enumName(status),
       'boxes': boxes.map((box) => box.toJson()).toList(),
+      'contentSha256': contentSha256,
       'errorMessage': errorMessage,
     };
   }
@@ -253,6 +394,7 @@ class AnnotatedImage {
           .cast<Map<String, Object?>>()
           .map(BoundingBox.fromJson)
           .toList(growable: false),
+      contentSha256: json['contentSha256'] as String?,
       errorMessage: json['errorMessage'] as String?,
     );
   }
