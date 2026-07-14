@@ -473,7 +473,7 @@ void main() {
       expect(service.state, AutoBoxState.ready);
     });
 
-    test('image larger than 512 MiB fails before client detect', () async {
+    test('image larger than 64 MiB fails before client detect', () async {
       final client = FakeBreadWorkerClient();
       final service = AutoBoxService(
         createClient: () => client,
@@ -625,7 +625,7 @@ void main() {
   });
 
   group('defaultAutoBoxService', () {
-    test('app-local runtime worker and model win over workspace paths', () {
+    test('app-local runtime worker and manifest win over workspace paths', () {
       final executable = p.join('C:\\Program Files', 'BBox', 'bbox.exe');
       final appDirectory = p.dirname(executable);
       final appPython = p.join(appDirectory, 'runtime', 'python', 'python.exe');
@@ -635,12 +635,12 @@ void main() {
         'detectors',
         'bread_box_worker.py',
       );
-      final appModel = p.join(
+      final appManifest = p.join(
         appDirectory,
         'models',
-        'bread_yolov8n_1class_tray_v0_2.pt',
+        'bread_pipeline_manifest.json',
       );
-      final existing = {appPython, appWorker, appModel};
+      final existing = {appPython, appWorker, appManifest};
       final checked = <String>[];
 
       final service = defaultAutoBoxService(
@@ -653,24 +653,24 @@ void main() {
       );
 
       expect(service.name, 'bread-yolo-boxes');
-      expect(checked, [appPython, appWorker, appModel]);
+      expect(checked, [appPython, appWorker, appManifest]);
     });
 
     test('environment overrides win over app-local paths', () async {
       const python = r'D:\runtime\python.exe';
       const worker = r'D:\worker\bread_box_worker.py';
-      const model = r'D:\models\bread.pt';
+      const manifest = r'D:\models\bread_pipeline_manifest.json';
       final checked = <String>[];
       final service = defaultAutoBoxService(
         environment: const {
           'BBOX_BREAD_PYTHON': python,
           'BBOX_BREAD_WORKER': worker,
-          'BBOX_BREAD_DETECTOR_MODEL': model,
+          'BBOX_BREAD_PIPELINE_MANIFEST': manifest,
         },
         executablePath: r'C:\app\bbox.exe',
         fileExists: (path) {
           checked.add(path);
-          return path != model;
+          return path != manifest;
         },
       );
 
@@ -679,8 +679,8 @@ void main() {
         throwsA(isA<AutoBoxStartupException>()),
       );
 
-      expect(checked, [python, worker, model]);
-      expect(service.lastError.toString(), contains(model));
+      expect(checked, [python, worker, manifest]);
+      expect(service.lastError.toString(), contains(manifest));
       expect(service.state, AutoBoxState.failed);
     });
 
@@ -695,8 +695,8 @@ void main() {
         final workspaceWorker = File(
           p.join('tools', 'detectors', 'bread_box_worker.py'),
         ).absolute.path;
-        final workspaceModel = File(
-          p.join('models', 'bread_yolov8n_1class_tray_v0_2.pt'),
+        final workspaceManifest = File(
+          p.join('models', 'bread_pipeline_manifest.json'),
         ).absolute.path;
         final service = defaultAutoBoxService(
           environment: const {},
@@ -717,7 +717,7 @@ void main() {
         expect(checked.sublist(checked.length - 3), [
           workspacePython,
           workspaceWorker,
-          workspaceModel,
+          workspaceManifest,
         ]);
         expect(service.lastError.toString(), contains(workspaceWorker));
       },
@@ -737,7 +737,7 @@ class FakeBreadWorkerClient extends BreadWorkerClient {
        super(
          pythonExecutable: 'python.exe',
          scriptPath: 'bread_box_worker.py',
-         modelPath: 'bread.pt',
+         pipelineManifestPath: 'bread_pipeline_manifest.json',
        );
 
   final Completer<void>? startCompleter;

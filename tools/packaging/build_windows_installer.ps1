@@ -46,10 +46,27 @@ function Find-Flutter {
   throw "Flutter was not found. Add flutter.bat to PATH or install it at C:\tools\flutter."
 }
 
+$manifestRelativePath = "models\bread_pipeline_manifest.json"
+$manifestPath = Join-Path (Get-Location).Path $manifestRelativePath
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+  throw "Required pipeline manifest was not found at $manifestPath."
+}
+$pipelineManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+foreach ($modelFile in @(
+    [string]$pipelineManifest.detector.file,
+    [string]$pipelineManifest.classifier.file
+  )) {
+  if (-not $modelFile.EndsWith(".pt") -or [System.IO.Path]::GetFileName($modelFile) -ne $modelFile) {
+    throw "Pipeline manifest contains an unsafe model filename: $modelFile"
+  }
+}
+
 $requiredAssetPaths = @(
   "runtime\python\python.exe",
   "tools\detectors\bread_box_worker.py",
-  "models\bread_yolov8n_1class_tray_v0_2.pt"
+  $manifestRelativePath,
+  ("models\" + [string]$pipelineManifest.detector.file),
+  ("models\" + [string]$pipelineManifest.classifier.file)
 )
 
 foreach ($requiredPath in $requiredAssetPaths) {

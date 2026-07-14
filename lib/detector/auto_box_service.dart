@@ -549,9 +549,9 @@ AutoBoxService defaultAutoBoxService({
     fileExists: activeFileExists,
     executableDirectory: executableDirectory,
   );
-  final modelPath = _resolveRequiredAsset(
-    environmentName: 'BBOX_BREAD_DETECTOR_MODEL',
-    relativeSegments: const ['models', 'bread_yolov8n_1class_tray_v0_2.pt'],
+  final pipelineManifestPath = _resolveRequiredAsset(
+    environmentName: 'BBOX_BREAD_PIPELINE_MANIFEST',
+    relativeSegments: const ['models', 'bread_pipeline_manifest.json'],
     environment: activeEnvironment,
     fileExists: activeFileExists,
     executableDirectory: executableDirectory,
@@ -559,7 +559,11 @@ AutoBoxService defaultAutoBoxService({
 
   return AutoBoxService(
     createClient: () {
-      final requiredAssets = [pythonExecutable, workerPath, modelPath];
+      final requiredAssets = [
+        pythonExecutable,
+        workerPath,
+        pipelineManifestPath,
+      ];
       final missing = requiredAssets
           .where((path) => !activeFileExists(path))
           .toList(growable: false);
@@ -571,7 +575,7 @@ AutoBoxService defaultAutoBoxService({
       return BreadWorkerClient(
         pythonExecutable: pythonExecutable,
         scriptPath: workerPath,
-        modelPath: modelPath,
+        pipelineManifestPath: pipelineManifestPath,
       );
     },
   );

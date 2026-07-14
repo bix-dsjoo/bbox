@@ -43,7 +43,7 @@ class BreadWorkerClient {
   BreadWorkerClient({
     required this.pythonExecutable,
     required this.scriptPath,
-    required this.modelPath,
+    required this.pipelineManifestPath,
     this.startTimeout = const Duration(seconds: 90),
     this.inferenceTimeout = const Duration(seconds: 120),
     this.shutdownTimeout = const Duration(seconds: 2),
@@ -52,7 +52,7 @@ class BreadWorkerClient {
 
   final String pythonExecutable;
   final String scriptPath;
-  final String modelPath;
+  final String pipelineManifestPath;
   final Duration startTimeout;
   final Duration inferenceTimeout;
   final Duration shutdownTimeout;
@@ -76,8 +76,8 @@ class BreadWorkerClient {
   Future<void> _start() async {
     final worker = await _startWorker(pythonExecutable, [
       scriptPath,
-      '--detector-model',
-      modelPath,
+      '--pipeline-manifest',
+      pipelineManifestPath,
     ]);
     _worker = worker;
     worker.stderrLines.listen(_recordStderr);

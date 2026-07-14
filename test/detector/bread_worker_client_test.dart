@@ -9,6 +9,31 @@ import 'package:bbox_labeler/detector/worker_protocol.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('start launches worker with the pipeline manifest', () async {
+    final handle = FakeBreadWorkerHandle();
+    List<String>? startedArguments;
+    final client = BreadWorkerClient(
+      pythonExecutable: 'python.exe',
+      scriptPath: 'bread_box_worker.py',
+      pipelineManifestPath: 'models/bread_pipeline_manifest.json',
+      startWorker: (executable, arguments) async {
+        startedArguments = arguments;
+        return handle;
+      },
+    );
+
+    final startFuture = client.start();
+    await Future<void>.delayed(Duration.zero);
+    handle.emitMessage(const {'version': 2, 'type': 'ready'});
+    await startFuture;
+
+    expect(startedArguments, [
+      'bread_box_worker.py',
+      '--pipeline-manifest',
+      'models/bread_pipeline_manifest.json',
+    ]);
+  });
+
   test('start waits for ready and detect reuses the same process', () async {
     final handle = FakeBreadWorkerHandle();
     var starterCalls = 0;
@@ -25,7 +50,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(started, isFalse);
 
-    handle.emitMessage(const {'version': 1, 'type': 'ready'});
+    handle.emitMessage(const {'version': 2, 'type': 'ready'});
     await startFuture;
 
     for (final requestId in ['1', '2']) {
@@ -38,7 +63,7 @@ void main() {
       );
       final request = await requestFuture;
       handle.emitMessage({
-        'version': 1,
+        'version': 2,
         'type': 'result',
         'requestId': request.header['requestId'],
         'image': {'width': 10, 'height': 20},
@@ -58,7 +83,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     handle.emitMessage(const {
-      'version': 1,
+      'version': 2,
       'type': 'result',
       'requestId': 'early',
     });
@@ -79,7 +104,7 @@ void main() {
     final handle = FakeBreadWorkerHandle();
     final client = testClient(handle);
     final startFuture = client.start();
-    handle.emitMessage(const {'version': 1, 'type': 'ready'});
+    handle.emitMessage(const {'version': 2, 'type': 'ready'});
     await startFuture;
 
     final requestFuture = handle.nextRequest();
@@ -91,7 +116,7 @@ void main() {
     );
     await requestFuture;
     handle.emitMessage(const {
-      'version': 1,
+      'version': 2,
       'type': 'result',
       'requestId': '8',
     });
@@ -112,7 +137,7 @@ void main() {
     final handle = FakeBreadWorkerHandle();
     final client = testClient(handle);
     final startFuture = client.start();
-    handle.emitMessage(const {'version': 1, 'type': 'ready'});
+    handle.emitMessage(const {'version': 2, 'type': 'ready'});
     await startFuture;
 
     for (var index = 0; index < 60; index++) {
@@ -129,7 +154,7 @@ void main() {
     final handle = FakeBreadWorkerHandle();
     final client = testClient(handle);
     final startFuture = client.start();
-    handle.emitMessage(const {'version': 1, 'type': 'ready'});
+    handle.emitMessage(const {'version': 2, 'type': 'ready'});
     await startFuture;
 
     final requestFuture = handle.nextRequest();
@@ -161,7 +186,7 @@ void main() {
       final handle = FakeBreadWorkerHandle(propagateStdinErrors: true);
       final client = testClient(handle);
       final startFuture = client.start();
-      handle.emitMessage(const {'version': 1, 'type': 'ready'});
+      handle.emitMessage(const {'version': 2, 'type': 'ready'});
       await startFuture;
       const fileError = FileSystemException('NAS disconnected mid-read');
       Stream<List<int>> failingPayload() async* {
@@ -210,7 +235,7 @@ void main() {
     final handle = FakeBreadWorkerHandle();
     final client = testClient(handle);
     final startFuture = client.start();
-    handle.emitMessage(const {'version': 1, 'type': 'ready'});
+    handle.emitMessage(const {'version': 2, 'type': 'ready'});
     await startFuture;
 
     for (final requestId in ['first', 'second']) {
@@ -223,7 +248,7 @@ void main() {
       );
       await requestFuture;
       handle.emitMessage({
-        'version': 1,
+        'version': 2,
         'type': 'result',
         'requestId': requestId,
         'image': {'width': 10, 'height': 20},
@@ -242,7 +267,7 @@ void main() {
       inferenceTimeout: const Duration(milliseconds: 1),
     );
     final startFuture = client.start();
-    handle.emitMessage(const {'version': 1, 'type': 'ready'});
+    handle.emitMessage(const {'version': 2, 'type': 'ready'});
     await startFuture;
 
     final requestFuture = handle.nextRequest();
@@ -276,7 +301,7 @@ void main() {
       shutdownTimeout: const Duration(milliseconds: 1),
     );
     final startFuture = client.start();
-    handle.emitMessage(const {'version': 1, 'type': 'ready'});
+    handle.emitMessage(const {'version': 2, 'type': 'ready'});
     await startFuture;
 
     final requestFuture = handle.nextRequest();
@@ -299,14 +324,14 @@ void main() {
       startWorker: (_, _) async => handles[starterCalls++],
     );
     final firstStart = client.start();
-    firstHandle.emitMessage(const {'version': 1, 'type': 'ready'});
+    firstHandle.emitMessage(const {'version': 2, 'type': 'ready'});
     await firstStart;
     await firstHandle.stdin.close();
 
     await expectLater(client.shutdown(), throwsA(anything));
 
     final secondStart = client.start();
-    secondHandle.emitMessage(const {'version': 1, 'type': 'ready'});
+    secondHandle.emitMessage(const {'version': 2, 'type': 'ready'});
     await secondStart;
     expect(starterCalls, 2);
     expect(firstHandle.killCalls, 1);
@@ -317,7 +342,7 @@ Future<WorkerRequestException> requestError(String code) async {
   final handle = FakeBreadWorkerHandle();
   final client = testClient(handle);
   final startFuture = client.start();
-  handle.emitMessage(const {'version': 1, 'type': 'ready'});
+  handle.emitMessage(const {'version': 2, 'type': 'ready'});
   await startFuture;
   final requestFuture = handle.nextRequest();
   final detectFuture = client.detect(
@@ -328,7 +353,7 @@ Future<WorkerRequestException> requestError(String code) async {
   );
   await requestFuture;
   handle.emitMessage({
-    'version': 1,
+    'version': 2,
     'type': 'error',
     'requestId': 'error',
     'code': code,
@@ -354,7 +379,7 @@ BreadWorkerClient testClient(
   return BreadWorkerClient(
     pythonExecutable: 'python.exe',
     scriptPath: 'bread_box_worker.py',
-    modelPath: 'bread.pt',
+    pipelineManifestPath: 'bread_pipeline_manifest.json',
     inferenceTimeout: inferenceTimeout,
     shutdownTimeout: shutdownTimeout,
     startWorker: startWorker ?? (_, _) async => handle,

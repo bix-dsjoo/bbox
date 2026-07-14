@@ -1,5 +1,5 @@
 # Project-level configuration.
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.19)
 project(bbox_labeler LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
@@ -8,7 +8,7 @@ set(BINARY_NAME "bbox_labeler")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
-cmake_policy(VERSION 3.14...3.25)
+cmake_policy(VERSION 3.19...3.25)
 
 # Define build configuration option.
 get_property(IS_MULTICONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
@@ -117,9 +117,30 @@ if(EXISTS "${BBOX_BREAD_WORKER_FILE}")
     DESTINATION "${CMAKE_INSTALL_PREFIX}/tools/detectors" COMPONENT Runtime)
 endif()
 
-set(BBOX_BREAD_MODEL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../models/bread_yolov8n_1class_tray_v0_2.pt")
-if(EXISTS "${BBOX_BREAD_MODEL_FILE}")
-  install(FILES "${BBOX_BREAD_MODEL_FILE}"
+set(BBOX_PIPELINE_MANIFEST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../models/bread_pipeline_manifest.json")
+if(EXISTS "${BBOX_PIPELINE_MANIFEST_FILE}")
+  file(READ "${BBOX_PIPELINE_MANIFEST_FILE}" BBOX_PIPELINE_MANIFEST_JSON)
+  string(JSON BBOX_DETECTOR_MODEL_NAME ERROR_VARIABLE BBOX_DETECTOR_JSON_ERROR
+    GET "${BBOX_PIPELINE_MANIFEST_JSON}" detector file)
+  string(JSON BBOX_CLASSIFIER_MODEL_NAME ERROR_VARIABLE BBOX_CLASSIFIER_JSON_ERROR
+    GET "${BBOX_PIPELINE_MANIFEST_JSON}" classifier file)
+  if(BBOX_DETECTOR_JSON_ERROR OR BBOX_CLASSIFIER_JSON_ERROR)
+    message(FATAL_ERROR "Could not read pipeline model filenames from ${BBOX_PIPELINE_MANIFEST_FILE}")
+  endif()
+  foreach(BBOX_MODEL_NAME IN ITEMS "${BBOX_DETECTOR_MODEL_NAME}" "${BBOX_CLASSIFIER_MODEL_NAME}")
+    if(NOT BBOX_MODEL_NAME MATCHES "^[A-Za-z0-9._-]+[.]pt$")
+      message(FATAL_ERROR "Pipeline manifest contains an unsafe model filename: ${BBOX_MODEL_NAME}")
+    endif()
+  endforeach()
+  set(BBOX_DETECTOR_MODEL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../models/${BBOX_DETECTOR_MODEL_NAME}")
+  set(BBOX_CLASSIFIER_MODEL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../models/${BBOX_CLASSIFIER_MODEL_NAME}")
+  foreach(BBOX_MODEL_FILE IN ITEMS "${BBOX_DETECTOR_MODEL_FILE}" "${BBOX_CLASSIFIER_MODEL_FILE}")
+    if(NOT EXISTS "${BBOX_MODEL_FILE}")
+      message(FATAL_ERROR "Pipeline model file does not exist: ${BBOX_MODEL_FILE}")
+    endif()
+  endforeach()
+  install(FILES "${BBOX_PIPELINE_MANIFEST_FILE}"
+    "${BBOX_DETECTOR_MODEL_FILE}" "${BBOX_CLASSIFIER_MODEL_FILE}"
     DESTINATION "${CMAKE_INSTALL_PREFIX}/models" COMPONENT Runtime)
 endif()
 

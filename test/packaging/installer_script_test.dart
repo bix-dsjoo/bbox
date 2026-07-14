@@ -29,14 +29,16 @@ void main() {
     },
   );
 
-  test('installer helper requires coordinate-only worker assets', () {
+  test('installer helper requires manifest-selected pipeline assets', () {
     final script = File(
       'tools/packaging/build_windows_installer.ps1',
     ).readAsStringSync();
 
     expect(script, contains('tools\\detectors\\bread_box_worker.py'));
-    expect(script, contains('models\\bread_yolov8n_1class_tray_v0_2.pt'));
-    expect(script, isNot(contains('bread_classifier')));
+    expect(script, contains('models\\bread_pipeline_manifest.json'));
+    expect(script, contains(r'$pipelineManifest.detector.file'));
+    expect(script, contains(r'$pipelineManifest.classifier.file'));
+    expect(script, isNot(contains('bread_yolov8n_1class_tray_v0_2.pt')));
     expect(script, isNot(contains('FastSAM')));
     expect(script, isNot(contains('AllowMissingDetectorRuntime')));
   });
@@ -51,7 +53,8 @@ void main() {
 
     expect(installerHelper, contains('verify_release_models.ps1'));
     expect(script, contains(r'$allowedReleaseModelPaths = @('));
-    expect(script, contains('bread_yolov8n_1class_tray_v0_2.pt'));
+    expect(script, contains(r'$pipelineManifest.detector.file'));
+    expect(script, contains(r'$pipelineManifest.classifier.file'));
     expect(script, contains(r'Get-ChildItem -LiteralPath $releaseRoot'));
     expect(script, contains(r'-Filter "*.pt"'));
     expect(script, contains(r'$unexpectedReleaseModels'));
@@ -65,10 +68,20 @@ void main() {
     final modelsDir = Directory(
       '${tempDir.path}${Platform.pathSeparator}models',
     )..createSync(recursive: true);
+    const detectorName = 'bread_detector_candidate_b2_recall_v2.pt';
+    const classifierName = 'bread_classifier_content_addressed.pt';
     File(
-      '${modelsDir.path}${Platform.pathSeparator}'
-      'bread_yolov8n_1class_tray_v0_2.pt',
+      '${modelsDir.path}${Platform.pathSeparator}$detectorName',
     ).writeAsBytesSync(const [1]);
+    File(
+      '${modelsDir.path}${Platform.pathSeparator}$classifierName',
+    ).writeAsBytesSync(const [2]);
+    File(
+      '${modelsDir.path}${Platform.pathSeparator}bread_pipeline_manifest.json',
+    ).writeAsStringSync(
+      '{"detector":{"file":"$detectorName"},'
+      '"classifier":{"file":"$classifierName"}}',
+    );
     final verifier = File(
       'tools/packaging/verify_release_models.ps1',
     ).absolute.path;
@@ -86,7 +99,7 @@ void main() {
 
     File(
       '${tempDir.path}${Platform.pathSeparator}research-only.pt',
-    ).writeAsBytesSync(const [2]);
+    ).writeAsBytesSync(const [3]);
     final extra = await Process.run('powershell.exe', [
       '-NoProfile',
       '-ExecutionPolicy',
@@ -138,7 +151,7 @@ void main() {
     },
   );
 
-  test('Windows build installs only coordinate-only detector assets', () {
+  test('Windows build installs only manifest-selected pipeline assets', () {
     final script = File(
       'windows/CMakeLists.txt',
     ).readAsStringSync().replaceAll('\r\n', '\n');
@@ -165,10 +178,16 @@ void main() {
     expect(
       activeRules,
       contains(
-        r'set(BBOX_BREAD_MODEL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../models/bread_yolov8n_1class_tray_v0_2.pt")',
+        r'set(BBOX_PIPELINE_MANIFEST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../models/bread_pipeline_manifest.json")',
       ),
     );
-    expect(activeRules, contains(r'install(FILES "${BBOX_BREAD_MODEL_FILE}"'));
+    expect(activeRules, contains('BBOX_DETECTOR_MODEL_FILE'));
+    expect(activeRules, contains('BBOX_CLASSIFIER_MODEL_FILE'));
+    expect(
+      activeRules,
+      contains(r'install(FILES "${BBOX_PIPELINE_MANIFEST_FILE}"'),
+    );
+    expect(activeRules, isNot(contains('bread_yolov8n_1class_tray_v0_2.pt')));
     expect(activeRules, isNot(contains('BBOX_MODEL_DIR')));
     expect(activeRules, isNot(contains('FILES_MATCHING')));
     expect(activeRules, isNot(contains('PATTERN "*.pt"')));

@@ -665,7 +665,7 @@ class _ControllerBreadWorkerClient extends BreadWorkerClient {
        super(
          pythonExecutable: 'python.exe',
          scriptPath: 'bread_box_worker.py',
-         modelPath: 'bread.pt',
+         pipelineManifestPath: 'bread_pipeline_manifest.json',
        );
 
   final Object? startError;

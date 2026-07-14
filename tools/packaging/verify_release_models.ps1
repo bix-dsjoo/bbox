@@ -5,15 +5,31 @@ param(
 
 $ErrorActionPreference = "Stop"
 $releaseRoot = [System.IO.Path]::GetFullPath($ReleaseRoot)
+$manifestPath = Join-Path $releaseRoot "models\bread_pipeline_manifest.json"
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+  throw "Required release pipeline manifest was not found: $manifestPath"
+}
+$pipelineManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+foreach ($modelFile in @(
+    [string]$pipelineManifest.detector.file,
+    [string]$pipelineManifest.classifier.file
+  )) {
+  if (-not $modelFile.EndsWith(".pt") -or [System.IO.Path]::GetFileName($modelFile) -ne $modelFile) {
+    throw "Release pipeline manifest contains an unsafe model filename: $modelFile"
+  }
+}
 $allowedReleaseModelPaths = @(
   [System.IO.Path]::GetFullPath(
-    (Join-Path $releaseRoot "models\bread_yolov8n_1class_tray_v0_2.pt")
+    (Join-Path $releaseRoot ("models\" + [string]$pipelineManifest.detector.file))
+  ),
+  [System.IO.Path]::GetFullPath(
+    (Join-Path $releaseRoot ("models\" + [string]$pipelineManifest.classifier.file))
   )
 )
 
 foreach ($allowedPath in $allowedReleaseModelPaths) {
   if (-not (Test-Path -LiteralPath $allowedPath -PathType Leaf)) {
-    throw "Required release detector model was not found: $allowedPath"
+    throw "Required release pipeline model was not found: $allowedPath"
   }
 }
 

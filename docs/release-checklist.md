@@ -15,13 +15,15 @@ Use this checklist before publishing a Windows installer for BBox Labeler.
 - Confirm these mandatory release assets exist:
   - `build/windows/x64/runner/Release/runtime/python/python.exe`
   - `build/windows/x64/runner/Release/tools/detectors/bread_box_worker.py`
-  - `build/windows/x64/runner/Release/models/bread_yolov8n_1class_tray_v0_2.pt`
+  - `build/windows/x64/runner/Release/models/bread_pipeline_manifest.json`
+  - the detector file named by `manifest.detector.file`
+  - the classifier file named by `manifest.classifier.file`
 - Confirm the installer script excludes `train`, `datasets`, `outputs`,
   `qa_samples`, and `research`.
 - Confirm Windows executable metadata does not contain `com.example`.
 - Confirm the app icon is present at `windows/runner/resources/app_icon.ico`.
-- Confirm FastSAM and classifier weights are absent because they are not
-  release assets.
+- Confirm FastSAM, the deprecated detector, and model files not named by the
+  pipeline manifest are absent.
 - Confirm the bundled detector runtime imports `torch`, `torchvision`, `cv2`,
   `numpy`, and `ultralytics`.
 - Launch the app and confirm model warm-up begins during startup.
