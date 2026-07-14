@@ -33,8 +33,9 @@ from tools.bread_training.metrics import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 AP_CONFIDENCE_FLOOR = 0.001
 DEFAULT_THRESHOLD_CANDIDATES = tuple(value / 100 for value in range(5, 100, 5))
+FAST_THRESHOLD_CANDIDATES = (0.25, 0.35, 0.45, 0.55, 0.65)
 DEFAULT_CLASSIFIER_INITIAL_WEIGHTS = Path("yolov8n-cls.pt")
-DETECTOR_CANDIDATE_EVALUATOR_VERSION = 2
+DETECTOR_CANDIDATE_EVALUATOR_VERSION = 3
 DETECTOR_CANDIDATE_TRAINER_SCHEMA_VERSION = 2
 
 
@@ -85,6 +86,14 @@ class DetectorCandidateReport:
     @property
     def fold_predictions(self) -> tuple[dict[str, Any], ...]:
         return self.fold_artifacts
+
+
+@dataclass(frozen=True)
+class OperationalScore:
+    total_misses: int
+    false_positives: int
+    max_image_misses: int
+    median_iou: float
 
 
 def detector_candidate_matrix(
@@ -1201,6 +1210,55 @@ def select_confidence_threshold(
     return max(scored)[3]
 
 
+def operational_score(
+    ground_truth: Mapping[str, Sequence[BBox]],
+    predictions: PredictionMap,
+) -> OperationalScore:
+    misses: list[int] = []
+    false_positives = 0
+    matched_ious: list[float] = []
+    for image_key in sorted(set(ground_truth) | set(predictions)):
+        result = match_detections(
+            ground_truth.get(image_key, ()), predictions.get(image_key, ())
+        )
+        misses.append(result.ground_truth_count - result.matches)
+        false_positives += result.prediction_count - result.matches
+        matched_ious.extend(result.matched_ious)
+    return OperationalScore(
+        total_misses=sum(misses),
+        false_positives=false_positives,
+        max_image_misses=max(misses, default=0),
+        median_iou=statistics.median(matched_ious) if matched_ious else 0.0,
+    )
+
+
+def select_operational_threshold(
+    ground_truth: Mapping[str, Sequence[BBox]],
+    raw_predictions: PredictionMap,
+    candidates: Sequence[float] = FAST_THRESHOLD_CANDIDATES,
+) -> float:
+    if not candidates:
+        raise ValueError("at least one confidence threshold candidate is required")
+    thresholds = tuple(sorted(set(float(candidate) for candidate in candidates)))
+    if any(not 0.0 <= threshold <= 1.0 for threshold in thresholds):
+        raise ValueError("confidence thresholds must be between zero and one")
+    ranked: list[tuple[bool, int, int, float, float]] = []
+    for threshold in thresholds:
+        score = operational_score(
+            ground_truth, _filtered_predictions(raw_predictions, threshold)
+        )
+        ranked.append(
+            (
+                score.max_image_misses <= 1,
+                -score.total_misses,
+                -score.false_positives,
+                score.median_iou,
+                threshold,
+            )
+        )
+    return max(ranked)[-1]
+
+
 def _prediction_json(prediction: Prediction) -> dict[str, Any]:
     return {
         "bbox": list(prediction.bbox),
@@ -1216,7 +1274,7 @@ def evaluate_detector_fold(
     ground_truth: Mapping[str, Sequence[BBox]],
     predict: PredictFunction,
     artifact_path: Path,
-    threshold_candidates: Sequence[float] = DEFAULT_THRESHOLD_CANDIDATES,
+    threshold_candidates: Sequence[float] = FAST_THRESHOLD_CANDIDATES,
     clock: Callable[[], float] = time.perf_counter,
     latency_records: dict[str, float] | None = None,
 ) -> DetectorReport:
@@ -1227,7 +1285,7 @@ def evaluate_detector_fold(
     if set(validation_keys) & set(held_out_keys):
         raise ValueError("train-side validation and held-out image keys must be disjoint")
     raw_validation_predictions = predict(validation_keys, AP_CONFIDENCE_FLOOR)
-    threshold = select_confidence_threshold(
+    threshold = select_operational_threshold(
         {key: ground_truth.get(key, ()) for key in validation_keys},
         raw_validation_predictions,
         threshold_candidates,
@@ -1255,16 +1313,32 @@ def evaluate_detector_fold(
         operational_predictions,
         ap_predictions=raw_held_out_predictions,
     )
+    image_results = {
+        image_key: match_detections(
+            held_out_ground_truth[image_key],
+            operational_predictions.get(image_key, ()),
+        )
+        for image_key in held_out_keys
+    }
     payload = {
         "schema_version": 2,
         "fold": fold,
         "ap_confidence_floor": AP_CONFIDENCE_FLOOR,
         "confidence_threshold": threshold,
+        "threshold_selection": "miss_first_v1",
         "threshold_selected_from": list(validation_keys),
         "metrics": asdict(report),
         "images": [
             {
                 "image_key": image_key,
+                "misses": (
+                    image_results[image_key].ground_truth_count
+                    - image_results[image_key].matches
+                ),
+                "false_positives": (
+                    image_results[image_key].prediction_count
+                    - image_results[image_key].matches
+                ),
                 "ground_truth": [list(box) for box in held_out_ground_truth[image_key]],
                 "raw_predictions": [
                     _prediction_json(prediction)

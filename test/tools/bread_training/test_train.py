@@ -12,11 +12,56 @@ from tools.bread_training.train import (
     Prediction,
     evaluate_detector_fold,
     evaluate_predictions,
+    select_operational_threshold,
     train_detector_fold,
 )
 
 
 class DetectorTrainingTest(unittest.TestCase):
+    def test_threshold_prefers_no_catastrophic_image_miss_over_higher_cutoff(self):
+        ground_truth = {
+            "dense.jpg": tuple(
+                (index * 20.0, 0.0, 10.0, 10.0) for index in range(5)
+            ),
+            "easy.jpg": ((0.0, 0.0, 10.0, 10.0),),
+        }
+        raw_predictions = {
+            "dense.jpg": tuple(
+                Prediction(
+                    (index * 20.0, 0.0, 10.0, 10.0), confidence
+                )
+                for index, confidence in enumerate(
+                    (0.95, 0.90, 0.69, 0.68, 0.59)
+                )
+            ),
+            "easy.jpg": (Prediction((0.0, 0.0, 10.0, 10.0), 0.99),),
+        }
+
+        threshold = select_operational_threshold(
+            ground_truth,
+            raw_predictions,
+            (0.55, 0.65, 0.75),
+        )
+
+        self.assertEqual(threshold, 0.55)
+
+    def test_threshold_tie_prefers_fewer_false_positives(self):
+        ground_truth = {"image.jpg": ((0.0, 0.0, 10.0, 10.0),)}
+        raw_predictions = {
+            "image.jpg": (
+                Prediction((0.0, 0.0, 10.0, 10.0), 0.90),
+                Prediction((30.0, 30.0, 5.0, 5.0), 0.50),
+            )
+        }
+
+        threshold = select_operational_threshold(
+            ground_truth,
+            raw_predictions,
+            (0.45, 0.55),
+        )
+
+        self.assertEqual(threshold, 0.55)
+
     def test_ranked_ap_uses_raw_low_floor_predictions_not_operational_filter(self):
         ground_truth = {
             "held.jpg": ((0, 0, 10, 10), (20, 0, 10, 10)),
@@ -159,8 +204,11 @@ class DetectorTrainingTest(unittest.TestCase):
         self.assertEqual(payload["fold"], 0)
         self.assertEqual(payload["ap_confidence_floor"], AP_CONFIDENCE_FLOOR)
         self.assertEqual(payload["confidence_threshold"], 0.9)
+        self.assertEqual(payload["threshold_selection"], "miss_first_v1")
         self.assertEqual(payload["threshold_selected_from"], ["train.jpg"])
         self.assertEqual(payload["images"][0]["image_key"], "held.jpg")
+        self.assertEqual(payload["images"][0]["misses"], 0)
+        self.assertEqual(payload["images"][0]["false_positives"], 0)
         self.assertEqual(
             payload["images"][0]["raw_predictions"][0]["bbox"],
             [0, 0, 10, 10],

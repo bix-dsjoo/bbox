@@ -252,7 +252,7 @@ class DetectorCandidateTest(unittest.TestCase):
                     "synthetic_ratio": 0.0,
                     "dataset_manifest_sha256": fingerprint["dataset_manifest_sha256"],
                     "candidate": "candidate",
-                    "evaluator_schema_version": 2,
+                    "evaluator_schema_version": 3,
                     "trainer_schema_version": 2,
                     "folds": [0, 1, 2, 3, 4],
                     "mosaic": 1.0,
