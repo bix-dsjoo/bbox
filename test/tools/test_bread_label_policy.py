@@ -7,6 +7,7 @@ from dataclasses import FrozenInstanceError, dataclass
 
 from tools.detectors.bread_label_policy import (
     LabelCandidate,
+    LabelDecision,
     classify_policy,
     is_ambiguous_scores,
     normalized_scores,
@@ -114,6 +115,43 @@ class BreadLabelPolicyTest(unittest.TestCase):
         )
         with self.assertRaises(FrozenInstanceError):
             ordered[0].score = 1.0  # type: ignore[misc]
+
+    def test_boolean_label_ids_cannot_alias_integer_labels(self) -> None:
+        boolean_key_scores = {
+            True: 0.95,
+            2: 0.05,
+            3: 0.0,
+            4: 0.0,
+            5: 0.0,
+        }
+
+        with self.assertRaises(ValueError):
+            normalized_scores(boolean_key_scores, manifest().labels)
+        with self.assertRaises(ValueError):
+            LabelCandidate(label_id=True, score=0.95)
+        with self.assertRaises(ValueError):
+            LabelDecision(
+                state="accepted",
+                label_id=True,
+                suggested_label_id=None,
+                candidates=(),
+                review_reasons=(),
+                embedding_used=False,
+            )
+
+    def test_boolean_candidate_id_is_rejected_before_dictionary_aliasing(self) -> None:
+        candidates = (
+            LabelCandidate.__new__(LabelCandidate),
+            LabelCandidate(label_id=2, score=0.05),
+            LabelCandidate(label_id=3, score=0.0),
+            LabelCandidate(label_id=4, score=0.0),
+            LabelCandidate(label_id=5, score=0.0),
+        )
+        object.__setattr__(candidates[0], "label_id", True)
+        object.__setattr__(candidates[0], "score", 0.95)
+
+        with self.assertRaises(ValueError):
+            normalized_scores(candidates, manifest().labels)
 
     def test_confident_prediction_is_accepted_with_exact_json_contract(self) -> None:
         decision = classify_policy(
@@ -286,6 +324,93 @@ class BreadLabelPolicyTest(unittest.TestCase):
             with self.subTest(scores=classifier_scores, box=box, image_size=image_size):
                 with self.assertRaises(ValueError):
                     classify_policy(classifier_scores, box, image_size, manifest())
+
+    def test_public_inputs_reject_booleans_and_numeric_strings(self) -> None:
+        invalid_scores = (
+            {1: True, 2: 0.1, 3: 0.9, 4: 0.0, 5: 0.0},
+            {1: "0.1", 2: 0.1, 3: 0.8, 4: 0.0, 5: 0.0},
+        )
+        for classifier_scores in invalid_scores:
+            with self.subTest(classifier_scores=classifier_scores):
+                with self.assertRaises(ValueError):
+                    classify_policy(
+                        classifier_scores, normal_box(), (1920, 1080), manifest()
+                    )
+
+        invalid_geometry = (
+            (Box(True, 100.0, 200.0, 100.0), (1920, 1080)),
+            (Box("100", 100.0, 200.0, 100.0), (1920, 1080)),  # type: ignore[arg-type]
+            (normal_box(), (True, 1080)),
+            (normal_box(), ("1920", 1080)),
+            (normal_box(), (math.inf, 1080)),
+        )
+        for box, image_size in invalid_geometry:
+            with self.subTest(box=box, image_size=image_size):
+                with self.assertRaises(ValueError):
+                    classify_policy(scores(), box, image_size, manifest())
+
+    def test_extreme_integers_fail_as_validation_errors(self) -> None:
+        enormous = 10**400
+
+        with self.assertRaises(ValueError):
+            LabelCandidate(label_id=1, score=enormous)
+        with self.assertRaises(ValueError):
+            normalized_scores(
+                {1: enormous, 2: 0.1, 3: 0.9, 4: 0.0, 5: 0.0},
+                manifest().labels,
+            )
+        with self.assertRaises(ValueError):
+            classify_policy(
+                scores(), Box(enormous, 0, 10, 10), (1920, 1080), manifest()
+            )
+
+    def test_public_policy_thresholds_reject_booleans_and_numeric_strings(self) -> None:
+        for field, value in (
+            ("acceptConfidence", True),
+            ("acceptMargin", "0.2"),
+            ("acceptConfidence", math.nan),
+        ):
+            policy_manifest = manifest()
+            policy_manifest.classifier[field] = value
+            with self.subTest(section="classifier", field=field, value=value):
+                with self.assertRaises(ValueError):
+                    classify_policy(
+                        scores(), normal_box(), (1920, 1080), policy_manifest
+                    )
+
+        for field, value in (
+            ("minBoxSize", True),
+            ("edgeMarginPx", "2"),
+            ("maxAreaRatio", "0.38"),
+            ("edgeMarginPx", math.inf),
+        ):
+            policy_manifest = manifest()
+            policy_manifest.quality[field] = value
+            with self.subTest(section="quality", field=field, value=value):
+                with self.assertRaises(ValueError):
+                    classify_policy(
+                        scores(), normal_box(), (1920, 1080), policy_manifest
+                    )
+
+    def test_invalid_verifier_threshold_fails_closed_as_review(self) -> None:
+        for field, value in (("scoreThreshold", True), ("marginThreshold", math.nan)):
+            policy_manifest = manifest(verifier_kind="torchscript")
+            policy_manifest.verifier[field] = value
+
+            decision = classify_policy(
+                scores(confidence=0.70, margin=0.02),
+                normal_box(),
+                (1920, 1080),
+                policy_manifest,
+                verifier=Verifier({"labelId": 3, "score": 0.90, "margin": 0.20}),
+            )
+
+            with self.subTest(field=field, value=value):
+                self.assertEqual(decision.state, "review")
+                self.assertEqual(
+                    decision.review_reasons,
+                    ("classifier_ambiguous", "verifier_failed"),
+                )
 
 
 if __name__ == "__main__":

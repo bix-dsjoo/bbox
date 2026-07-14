@@ -14,6 +14,11 @@ class LabelCandidate:
     label_id: int
     score: float
 
+    def __post_init__(self) -> None:
+        if type(self.label_id) is not int:
+            raise ValueError("candidate label ID must be an integer")
+        _exact_number(self.score, "candidate score", minimum=0.0, maximum=1.0)
+
     def to_json(self) -> dict[str, int | float]:
         return {"labelId": self.label_id, "score": self.score}
 
@@ -26,6 +31,15 @@ class LabelDecision:
     candidates: tuple[LabelCandidate, ...]
     review_reasons: tuple[str, ...]
     embedding_used: bool
+
+    def __post_init__(self) -> None:
+        if self.label_id is not None and type(self.label_id) is not int:
+            raise ValueError("decision label ID must be an integer or null")
+        if (
+            self.suggested_label_id is not None
+            and type(self.suggested_label_id) is not int
+        ):
+            raise ValueError("suggested label ID must be an integer or null")
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -65,6 +79,28 @@ class _VerifierResult:
     margin: float
 
 
+def _exact_number(
+    value: Any,
+    name: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    if type(value) not in (int, float):
+        raise ValueError(f"{name} must be an integer or float")
+    try:
+        number = float(value)
+    except OverflowError as error:
+        raise ValueError(f"{name} must be finite") from error
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be finite")
+    if minimum is not None and number < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    if maximum is not None and number > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return number
+
+
 def _field(value: Any, name: str) -> Any:
     if isinstance(value, Mapping):
         try:
@@ -83,12 +119,13 @@ def _normalized_box(value: Any, image_size: Sequence[Any]) -> tuple[_Box, float,
     if len(image_size) != 2:
         raise ValueError("image_size must contain width and height")
     try:
-        image_width, image_height = (float(item) for item in image_size)
+        image_width = _exact_number(image_size[0], "image width")
+        image_height = _exact_number(image_size[1], "image height")
         box = _Box(
-            x=float(_field(value, "x")),
-            y=float(_field(value, "y")),
-            width=float(_field(value, "width")),
-            height=float(_field(value, "height")),
+            x=_exact_number(_field(value, "x"), "box x"),
+            y=_exact_number(_field(value, "y"), "box y"),
+            width=_exact_number(_field(value, "width"), "box width"),
+            height=_exact_number(_field(value, "height"), "box height"),
         )
     except (TypeError, ValueError, OverflowError) as error:
         raise ValueError("box and image dimensions must be finite numbers") from error
@@ -142,10 +179,14 @@ def normalized_scores(
         raise ValueError("manifest label IDs must be non-empty and unique")
 
     if isinstance(classifier_scores, Mapping):
+        if any(type(key) is not int for key in classifier_scores):
+            raise ValueError("classifier score label IDs must be integers")
         if set(classifier_scores) != set(label_ids):
             raise ValueError("classifier scores must match manifest label IDs")
         raw_items = tuple((label_id, classifier_scores[label_id]) for label_id in label_ids)
     else:
+        if hasattr(classifier_scores, "tolist"):
+            classifier_scores = classifier_scores.tolist()
         try:
             values = tuple(classifier_scores)
         except TypeError as error:
@@ -153,6 +194,8 @@ def normalized_scores(
         if len(values) != len(label_ids):
             raise ValueError("classifier scores must match manifest labels")
         if all(isinstance(item, LabelCandidate) for item in values):
+            if any(type(item.label_id) is not int for item in values):
+                raise ValueError("classifier candidate label IDs must be integers")
             by_id = {item.label_id: item.score for item in values}
             if len(by_id) != len(values) or set(by_id) != set(label_ids):
                 raise ValueError("classifier candidates must match manifest label IDs")
@@ -162,16 +205,9 @@ def normalized_scores(
 
     candidates: list[LabelCandidate] = []
     for label_id, raw_score in raw_items:
-        if type(raw_score) not in (int, float):
-            try:
-                raw_score = raw_score.item()
-            except (AttributeError, TypeError, ValueError) as error:
-                raise ValueError("classifier scores must be finite numbers") from error
-        if type(raw_score) not in (int, float):
-            raise ValueError("classifier scores must be finite numbers")
-        score = float(raw_score)
-        if not math.isfinite(score) or not 0.0 <= score <= 1.0:
-            raise ValueError("classifier scores must be between 0 and 1")
+        score = _exact_number(
+            raw_score, "classifier score", minimum=0.0, maximum=1.0
+        )
         candidates.append(LabelCandidate(label_id=label_id, score=score))
     candidates.sort(key=lambda item: (-item.score, item.label_id))
     return tuple(candidates)
@@ -185,17 +221,23 @@ def _policy_candidates(classifier_scores: Any, manifest: Any) -> tuple[LabelCand
 def _is_ambiguous(candidates: tuple[LabelCandidate, ...], manifest: Any) -> bool:
     classifier = _manifest_section(manifest, "classifier")
     try:
-        confidence_threshold = float(classifier["acceptConfidence"])
-        margin_threshold = float(classifier["acceptMargin"])
+        confidence_threshold = _exact_number(
+            classifier["acceptConfidence"],
+            "acceptConfidence",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        margin_threshold = _exact_number(
+            classifier["acceptMargin"],
+            "acceptMargin",
+            minimum=0.0,
+            maximum=1.0,
+        )
         conservative = classifier["conservativeClasses"]
     except (KeyError, TypeError, ValueError, OverflowError) as error:
         raise ValueError("manifest classifier policy is invalid") from error
     if (
-        not math.isfinite(confidence_threshold)
-        or not math.isfinite(margin_threshold)
-        or not 0.0 <= confidence_threshold <= 1.0
-        or not 0.0 <= margin_threshold <= 1.0
-        or not isinstance(conservative, Sequence)
+        not isinstance(conservative, Sequence)
         or isinstance(conservative, (str, bytes))
         or any(type(item) is not int for item in conservative)
     ):
@@ -218,20 +260,20 @@ def quality_reasons(
 ) -> tuple[str, ...]:
     box, image_width, image_height = _normalized_box(det_box, image_size)
     try:
-        min_box_size = float(quality["minBoxSize"])
-        edge_margin = float(quality["edgeMarginPx"])
-        max_area_ratio = float(quality["maxAreaRatio"])
+        min_box_size = _exact_number(
+            quality["minBoxSize"], "minBoxSize", minimum=0.0
+        )
+        edge_margin = _exact_number(
+            quality["edgeMarginPx"], "edgeMarginPx", minimum=0.0
+        )
+        max_area_ratio = _exact_number(
+            quality["maxAreaRatio"],
+            "maxAreaRatio",
+            minimum=0.0,
+            maximum=1.0,
+        )
     except (KeyError, TypeError, ValueError, OverflowError) as error:
         raise ValueError("manifest quality policy is invalid") from error
-    thresholds = (min_box_size, edge_margin, max_area_ratio)
-    if (
-        not all(math.isfinite(item) for item in thresholds)
-        or min_box_size < 0
-        or edge_margin < 0
-        or not 0.0 <= max_area_ratio <= 1.0
-    ):
-        raise ValueError("manifest quality policy is invalid")
-
     reasons: list[str] = []
     if box.width < min_box_size or box.height < min_box_size:
         reasons.append("too_small")
@@ -295,8 +337,18 @@ def _verifier_result(value: Any) -> _VerifierResult:
 def _verifier_passes(result: _VerifierResult, top_label_id: int, manifest: Any) -> bool:
     specification = _manifest_section(manifest, "verifier")
     try:
-        score_threshold = float(specification["scoreThreshold"])
-        margin_threshold = float(specification["marginThreshold"])
+        score_threshold = _exact_number(
+            specification["scoreThreshold"],
+            "verifier scoreThreshold",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        margin_threshold = _exact_number(
+            specification["marginThreshold"],
+            "verifier marginThreshold",
+            minimum=0.0,
+            maximum=1.0,
+        )
     except (KeyError, TypeError, ValueError, OverflowError) as error:
         raise ValueError("manifest verifier policy is invalid") from error
     return (
