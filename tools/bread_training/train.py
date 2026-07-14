@@ -19,6 +19,7 @@ from tools.bread_training.metrics import (
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+AP_CONFIDENCE_FLOOR = 0.001
 DEFAULT_THRESHOLD_CANDIDATES = tuple(value / 100 for value in range(5, 100, 5))
 
 
@@ -147,7 +148,10 @@ def _average_precision(
 
 
 def evaluate_predictions(
-    ground_truth: Mapping[str, Sequence[BBox]], predictions: PredictionMap
+    ground_truth: Mapping[str, Sequence[BBox]],
+    predictions: PredictionMap,
+    *,
+    ap_predictions: PredictionMap | None = None,
 ) -> DetectorReport:
     total_ground_truth = 0
     total_predictions = 0
@@ -163,8 +167,11 @@ def evaluate_predictions(
         total_matches += result.matches
         matched_ious.extend(result.matched_ious)
         area_ratios.extend(result.matched_area_ratios)
+    ranked_predictions = (
+        ap_predictions if ap_predictions is not None else predictions
+    )
     map50_95 = statistics.fmean(
-        _average_precision(ground_truth, predictions, threshold / 100)
+        _average_precision(ground_truth, ranked_predictions, threshold / 100)
         for threshold in range(50, 100, 5)
     )
     return DetectorReport(
@@ -217,6 +224,8 @@ def evaluate_detector_fold(
     predict: PredictFunction,
     artifact_path: Path,
     threshold_candidates: Sequence[float] = DEFAULT_THRESHOLD_CANDIDATES,
+    clock: Callable[[], float] = time.perf_counter,
+    latency_records: dict[str, float] | None = None,
 ) -> DetectorReport:
     """Select on train-side data, then run held-out inference with a frozen value."""
 
@@ -224,21 +233,39 @@ def evaluate_detector_fold(
     held_out_keys = tuple(sorted(held_out_keys))
     if set(validation_keys) & set(held_out_keys):
         raise ValueError("train-side validation and held-out image keys must be disjoint")
-    raw_validation_predictions = predict(validation_keys, 0.0)
+    raw_validation_predictions = predict(validation_keys, AP_CONFIDENCE_FLOOR)
     threshold = select_confidence_threshold(
         {key: ground_truth.get(key, ()) for key in validation_keys},
         raw_validation_predictions,
         threshold_candidates,
     )
-    held_out_predictions = predict(held_out_keys, threshold)
-    held_out_predictions = _filtered_predictions(held_out_predictions, threshold)
+    raw_held_out_predictions: dict[str, tuple[Prediction, ...]] = {}
+    held_out_latencies: dict[str, float] = {}
+    for image_key in held_out_keys:
+        started = clock()
+        image_predictions = predict((image_key,), AP_CONFIDENCE_FLOOR)
+        elapsed_ms = (clock() - started) * 1000
+        raw_held_out_predictions[image_key] = tuple(
+            image_predictions.get(image_key, ())
+        )
+        held_out_latencies[image_key] = elapsed_ms
+    if latency_records is not None:
+        latency_records.update(held_out_latencies)
+    operational_predictions = _filtered_predictions(
+        raw_held_out_predictions, threshold
+    )
     held_out_ground_truth = {
         key: tuple(ground_truth.get(key, ())) for key in held_out_keys
     }
-    report = evaluate_predictions(held_out_ground_truth, held_out_predictions)
+    report = evaluate_predictions(
+        held_out_ground_truth,
+        operational_predictions,
+        ap_predictions=raw_held_out_predictions,
+    )
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "fold": fold,
+        "ap_confidence_floor": AP_CONFIDENCE_FLOOR,
         "confidence_threshold": threshold,
         "threshold_selected_from": list(validation_keys),
         "metrics": asdict(report),
@@ -246,10 +273,15 @@ def evaluate_detector_fold(
             {
                 "image_key": image_key,
                 "ground_truth": [list(box) for box in held_out_ground_truth[image_key]],
-                "predictions": [
+                "raw_predictions": [
                     _prediction_json(prediction)
-                    for prediction in held_out_predictions.get(image_key, ())
+                    for prediction in raw_held_out_predictions.get(image_key, ())
                 ],
+                "operational_predictions": [
+                    _prediction_json(prediction)
+                    for prediction in operational_predictions.get(image_key, ())
+                ],
+                "latency_ms": held_out_latencies[image_key],
             }
             for image_key in held_out_keys
         ],
@@ -266,7 +298,6 @@ class _UltralyticsPredictor:
         YOLO = _yolo_class()
         self._model = YOLO(str(weights))
         self._paths_by_key = paths_by_key
-        self.latencies_ms: list[float] = []
 
     def __call__(
         self, image_keys: Sequence[str], confidence: float
@@ -274,23 +305,18 @@ class _UltralyticsPredictor:
         if not image_keys:
             return {}
         paths = [str(self._paths_by_key[key]) for key in image_keys]
-        started = time.perf_counter()
         results = self._model.predict(
             source=paths,
-            conf=max(confidence, 0.001),
+            conf=max(confidence, AP_CONFIDENCE_FLOOR),
             imgsz=640,
             device="cpu",
             verbose=False,
             stream=False,
         )
-        elapsed_ms = (time.perf_counter() - started) * 1000
         if len(results) != len(image_keys):
             raise RuntimeError("Ultralytics returned a different number of results")
         predictions: dict[str, tuple[Prediction, ...]] = {}
-        fallback_latency = elapsed_ms / len(image_keys)
         for image_key, result in zip(image_keys, results):
-            speed = getattr(result, "speed", {}) or {}
-            self.latencies_ms.append(float(speed.get("inference", fallback_latency)))
             xyxy = result.boxes.xyxy.cpu().tolist()
             confidences = result.boxes.conf.cpu().tolist()
             image_predictions = []
@@ -356,12 +382,15 @@ def run_detector_oof(
         raise FileNotFoundError(f"Catalog image does not exist: {missing_images[0]}")
     predictor = _UltralyticsPredictor(baseline_weights, paths)
     fold_reports: list[DetectorReport] = []
+    held_out_latencies: dict[str, float] = {}
+    fold_latency_medians: list[float] = []
     for fold in range(folds):
         held_out_keys = tuple(key for key, value in assignments.items() if value == fold)
         validation_fold = (fold + 1) % folds
         validation_keys = tuple(
             key for key, value in assignments.items() if value == validation_fold
         )
+        fold_latencies: dict[str, float] = {}
         fold_reports.append(
             evaluate_detector_fold(
                 fold=fold,
@@ -370,24 +399,35 @@ def run_detector_oof(
                 ground_truth=ground_truth,
                 predict=predictor,
                 artifact_path=output_root / f"fold_{fold}_predictions.json",
+                latency_records=fold_latencies,
             )
         )
+        held_out_latencies.update(fold_latencies)
+        fold_latency_medians.append(statistics.median(fold_latencies.values()))
     aggregate = detector_report(fold_reports)
     report_path = output_root / "detector_report.json"
     report_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "model": str(baseline_weights.resolve()),
                 "aggregation": "paired_fold_mean",
+                "ap_confidence_floor": AP_CONFIDENCE_FLOOR,
+                "latency_measurement": (
+                    "wall_clock_full_predictor_call_per_held_out_image"
+                ),
                 "folds": [
-                    {"fold": index, "metrics": asdict(report)}
+                    {
+                        "fold": index,
+                        "metrics": asdict(report),
+                        "median_latency_ms": fold_latency_medians[index],
+                    }
                     for index, report in enumerate(fold_reports)
                 ],
                 "metrics": asdict(aggregate),
                 "median_latency_ms": (
-                    statistics.median(predictor.latencies_ms)
-                    if predictor.latencies_ms
+                    statistics.median(held_out_latencies.values())
+                    if held_out_latencies
                     else 0.0
                 ),
             },
