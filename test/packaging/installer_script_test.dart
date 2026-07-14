@@ -139,9 +139,11 @@ void main() {
   );
 
   test('Windows build installs only coordinate-only detector assets', () {
-    final script = File('windows/CMakeLists.txt').readAsStringSync();
+    final script = File(
+      'windows/CMakeLists.txt',
+    ).readAsStringSync().replaceAll('\r\n', '\n');
 
-    final cleanupStart = script.indexOf('install(CODE "\n  file(REMOVE');
+    final cleanupStart = script.indexOf('install(CODE "\n  file(REMOVE\n');
     final cleanupEnd = script.indexOf('" COMPONENT Runtime)', cleanupStart);
     expect(cleanupStart, isNonNegative);
     expect(cleanupEnd, isNonNegative);
