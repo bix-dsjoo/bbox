@@ -546,7 +546,7 @@ Create `collect_source_images(selection_path: Path, source_prefix: str) -> tuple
 The CLI arguments are exact:
 
 ```text
---selection PATH --source-prefix Test_20260714/ --output PATH --columns 5
+--selection PATH --image-root PATH --source-prefix Test_20260714/ --output PATH --columns 5
 ```
 
 It writes `contact_sheet.jpg` and `per_image_metrics.csv` below `--output` and fails unless exactly 30 source images are collected.
@@ -597,6 +597,7 @@ Expected: manifest audit reports `ok=true`; baseline is recorded only as depreca
 ```powershell
 runtime\python\oof_eval\Scripts\python.exe -m tools.bread_training.visualize_detector_oof `
   --selection outputs\model_selection\fast_detector_ab\fast_selection.json `
+  --image-root C:\workspace\bixolon_bakery `
   --source-prefix Test_20260714/ `
   --output outputs\visualizations\detector_test_20260714_fast `
   --columns 5
