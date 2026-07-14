@@ -7,6 +7,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -30,15 +31,19 @@ def request_frame(
     *,
     request_type="detect",
     max_proposals=None,
+    boxes=None,
+    version=2,
 ) -> bytes:
     fields = {
-        "version": 1,
+        "version": version,
         "type": request_type,
         "requestId": request_id,
         "fileName": "한글 image.png",
     }
     if max_proposals is not None:
         fields["maxProposals"] = max_proposals
+    if boxes is not None:
+        fields["boxes"] = boxes
     header = json.dumps(
         fields,
         ensure_ascii=False,
@@ -58,6 +63,15 @@ def response_frames(data: bytes):
         length = struct.unpack(">I", stream.read(4))[0]
         decoded.append(json.loads(stream.read(length).decode("utf-8")))
     return decoded
+
+
+def raw_frame(header: bytes, payload: bytes = b"") -> bytes:
+    return (
+        struct.pack(">I", len(header))
+        + header
+        + struct.pack(">Q", len(payload))
+        + payload
+    )
 
 
 def box(x1, y1, x2, y2, confidence=0.9):
@@ -169,15 +183,24 @@ class CropOnlyVerifier:
 
 def pipeline_manifest(*, verifier_kind="none", duplicate_iou=0.95):
     return types.SimpleNamespace(
-        detector={"imgsz": 640, "confidence": 0.4, "iou": 0.55},
+        pipeline_version="bread-pipeline-v1",
+        policy_version="bread-label-policy-v2",
+        detector={
+            "imgsz": 640,
+            "confidence": 0.4,
+            "iou": 0.55,
+            "sha256": "1" * 64,
+        },
         classifier={
             "imgsz": 224,
             "acceptConfidence": 0.8,
             "acceptMargin": 0.2,
             "conservativeClasses": [],
+            "sha256": "2" * 64,
         },
         verifier={
             "kind": verifier_kind,
+            "sha256": None if verifier_kind == "none" else "3" * 64,
             "scoreThreshold": None if verifier_kind == "none" else 0.9,
             "marginThreshold": None if verifier_kind == "none" else 0.2,
         },
@@ -235,15 +258,262 @@ def engine_args():
 
 
 class FakeEngine:
-    def __init__(self):
+    def __init__(self, manifest=None):
         self.calls = []
+        self.classify_calls = []
+        self.manifest = manifest or pipeline_manifest()
 
     def detect_bytes(self, payload, max_proposals=None):
         self.calls.append((payload, max_proposals))
-        return {"width": 100, "height": 80, "boxes": []}
+        return {
+            "image": {
+                "width": 100,
+                "height": 80,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            },
+            "boxes": [],
+            "stageErrors": [],
+        }
+
+    def classify_bytes(self, payload, boxes):
+        self.classify_calls.append((payload, boxes))
+        return {
+            "image": {
+                "width": 100,
+                "height": 80,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            },
+            "boxes": [
+                {
+                    **boxes[0],
+                    "confidence": None,
+                    "label": {
+                        "state": "accepted",
+                        "labelId": 1,
+                        "suggestedLabelId": None,
+                        "candidates": [{"labelId": 1, "score": 0.99}],
+                        "reviewReasons": [],
+                        "embeddingUsed": False,
+                    },
+                }
+            ],
+            "stageErrors": [],
+        }
 
 
 class WorkerProtocolTest(unittest.TestCase):
+    def test_runtime_engine_is_loaded_from_validated_manifest(self):
+        manifest = pipeline_manifest()
+        resolved = types.SimpleNamespace(
+            detector_path=Path("detector.pt"),
+            classifier_path=Path("classifier.pt"),
+            classifier_error=None,
+            verifier_path=None,
+            verifier_error=None,
+        )
+        detector = PipelineDetector([])
+        classifier = BatchClassifier([])
+        loads = []
+
+        with mock.patch.object(
+            worker,
+            "load_pipeline_manifest",
+            side_effect=lambda path: loads.append(("manifest", path)) or manifest,
+            create=True,
+        ), mock.patch.object(
+            worker,
+            "resolve_model_paths",
+            side_effect=lambda path, value: loads.append(("models", path, value))
+            or resolved,
+            create=True,
+        ):
+            engine = worker.load_runtime_engine(
+                Path("models/bread_pipeline_manifest.json"),
+                cv2,
+                np,
+                lambda path: detector if path == resolved.detector_path else classifier,
+            )
+
+        self.assertIs(engine.manifest, manifest)
+        self.assertEqual(
+            loads,
+            [
+                ("manifest", Path("models/bread_pipeline_manifest.json")),
+                (
+                    "models",
+                    Path("models/bread_pipeline_manifest.json"),
+                    manifest,
+                ),
+            ],
+        )
+
+    def test_ready_advertises_exact_protocol_and_manifest_capabilities(self):
+        ready = worker.ready_message(FakeEngine())
+
+        self.assertEqual(
+            ready,
+            {
+                "version": 2,
+                "type": "ready",
+                "detectorName": "bread-yolo-boxes",
+                "capabilities": {
+                    "detect": True,
+                    "classify": True,
+                    "autoLabel": True,
+                    "verifier": False,
+                },
+            },
+        )
+
+    def test_classify_dispatch_returns_exact_nested_v2_contract(self):
+        payload = b"image"
+        supplied = {"id": "b1", "x": 1, "y": 2, "width": 10, "height": 11}
+        engine = FakeEngine()
+        stdout = io.BytesIO()
+
+        worker.serve(
+            io.BytesIO(
+                request_frame(
+                    "r2", payload, request_type="classify", boxes=[supplied]
+                )
+            ),
+            stdout,
+            engine,
+        )
+        self.assertEqual(engine.classify_calls, [(payload, [supplied])])
+        self.assertEqual(
+            response_frames(stdout.getvalue())[0],
+            {
+                "version": 2,
+                "type": "result",
+                "requestId": "r2",
+                "pipelineVersion": "bread-pipeline-v1",
+                "policyVersion": "bread-label-policy-v2",
+                "detectorName": "bread-yolo-boxes",
+                "modelHashes": {
+                    "detector": "1" * 64,
+                    "classifier": "2" * 64,
+                    "verifier": None,
+                },
+                "image": {
+                    "width": 100,
+                    "height": 80,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                },
+                "boxes": [
+                    {
+                        **supplied,
+                        "confidence": None,
+                        "label": {
+                            "state": "accepted",
+                            "labelId": 1,
+                            "suggestedLabelId": None,
+                            "candidates": [{"labelId": 1, "score": 0.99}],
+                            "reviewReasons": [],
+                            "embeddingUsed": False,
+                        },
+                    }
+                ],
+                "stageErrors": [],
+            },
+        )
+
+    def test_protocol_version_requires_exact_integer_two_without_desync(self):
+        for invalid_version in (1, True, "2"):
+            with self.subTest(version=invalid_version):
+                engine = FakeEngine()
+                stream = io.BytesIO(
+                    request_frame("bad", b"bad", version=invalid_version)
+                    + request_frame("good", b"good")
+                )
+                stdout = io.BytesIO()
+
+                with self.assertRaisesRegex(ValueError, "protocol version"):
+                    worker.serve(stream, stdout, engine)
+                worker.serve(stream, stdout, engine)
+
+                self.assertEqual(engine.calls, [(b"good", None)])
+
+    def test_unknown_message_type_is_rejected_without_desync(self):
+        engine = FakeEngine()
+        stream = io.BytesIO(
+            request_frame("bad", b"bad", request_type="inspect")
+            + request_frame("good", b"good")
+        )
+        stdout = io.BytesIO()
+
+        with self.assertRaisesRegex(ValueError, "request type"):
+            worker.serve(stream, stdout, engine)
+        worker.serve(stream, stdout, engine)
+
+        self.assertEqual(engine.calls, [(b"good", None)])
+
+    def test_malformed_json_header_is_consumed_before_rejection(self):
+        stream = io.BytesIO(
+            raw_frame(b'{"version":2', b"discarded")
+            + request_frame("good", b"good")
+        )
+
+        with self.assertRaisesRegex(ValueError, "valid JSON object"):
+            worker.read_request(stream)
+
+        header, payload = worker.read_request(stream)
+        self.assertEqual(header["requestId"], "good")
+        self.assertEqual(payload, b"good")
+
+    def test_request_and_classify_box_ids_must_be_nonempty_strings(self):
+        invalid_headers = [
+            {"version": 2, "type": "detect", "requestId": 7},
+            {"version": 2, "type": "detect", "requestId": ""},
+            {
+                "version": 2,
+                "type": "classify",
+                "requestId": "r",
+                "boxes": [
+                    {"id": 7, "x": 1, "y": 1, "width": 2, "height": 2}
+                ],
+            },
+        ]
+        for header in invalid_headers:
+            with self.subTest(header=header):
+                encoded = json.dumps(header).encode("utf-8")
+                with self.assertRaisesRegex(ValueError, "ID"):
+                    worker.serve(
+                        io.BytesIO(raw_frame(encoded, b"image")),
+                        io.BytesIO(),
+                        FakeEngine(),
+                    )
+
+    def test_classify_rejects_more_than_one_hundred_supplied_boxes(self):
+        boxes = [
+            {"id": f"b{index}", "x": 1, "y": 1, "width": 2, "height": 2}
+            for index in range(101)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "at most 100"):
+            worker.serve(
+                io.BytesIO(
+                    request_frame("too-many", b"image", request_type="classify", boxes=boxes)
+                ),
+                io.BytesIO(),
+                FakeEngine(),
+            )
+
+    def test_json_writer_rejects_nonfinite_numbers_without_writing_a_frame(self):
+        stdout = io.BytesIO()
+
+        with self.assertRaises(ValueError):
+            worker.write_json_frame(stdout, {"score": float("nan")})
+
+        self.assertEqual(stdout.getvalue(), b"")
+
+    def test_json_writer_uses_compact_canonical_key_order(self):
+        stdout = io.BytesIO()
+
+        worker.write_json_frame(stdout, {"z": 1, "a": 2})
+
+        self.assertEqual(stdout.getvalue()[4:], b'{"a":2,"z":1}')
+
     def test_two_requests_reuse_one_engine(self):
         engine = FakeEngine()
         stdin = io.BytesIO(request_frame("1", b"first") + request_frame("2", b"second"))

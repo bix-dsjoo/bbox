@@ -14,15 +14,23 @@ try:
         is_ambiguous_scores,
         normalized_scores,
     )
+    from tools.detectors.bread_pipeline_manifest import (
+        load_pipeline_manifest,
+        resolve_model_paths,
+    )
 except ModuleNotFoundError:  # Direct execution from tools/detectors.
     from bread_label_policy import (  # type: ignore[no-redef]
         classify_policy,
         is_ambiguous_scores,
         normalized_scores,
     )
+    from bread_pipeline_manifest import (  # type: ignore[no-redef]
+        load_pipeline_manifest,
+        resolve_model_paths,
+    )
 
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 MAX_HEADER_BYTES = 64 * 1024
 MAX_IMAGE_BYTES = 512 * 1024 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -51,17 +59,33 @@ def read_request(stream):
     header_length = struct.unpack(">I", prefix)[0]
     if header_length > MAX_HEADER_BYTES:
         raise ValueError("request header exceeds 64 KiB")
-    header = json.loads(read_exact(stream, header_length).decode("utf-8"))
+    encoded_header = read_exact(stream, header_length)
     payload_length = struct.unpack(">Q", read_exact(stream, 8))[0]
     if payload_length > MAX_IMAGE_BYTES:
         raise ValueError("image payload exceeds 512 MiB")
-    return header, read_exact(stream, payload_length)
+    payload = read_exact(stream, payload_length)
+    try:
+        header = json.loads(
+            encoded_header.decode("utf-8"),
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON constant: {value}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError("request header must be a valid JSON object") from error
+    if not isinstance(header, dict):
+        raise ValueError("request header must be a valid JSON object")
+    return header, payload
 
 
 def write_json_frame(stream, payload):
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
-        "utf-8"
-    )
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
     if len(encoded) > MAX_RESPONSE_BYTES:
         raise ValueError("response exceeds 1 MiB")
     stream.write(struct.pack(">I", len(encoded)))
@@ -320,32 +344,117 @@ def create_pipeline_engine(
     )
 
 
+def load_runtime_engine(manifest_path, cv2, np, yolo_factory):
+    manifest_path = Path(manifest_path)
+    manifest = load_pipeline_manifest(manifest_path)
+    resolved_models = resolve_model_paths(manifest_path, manifest)
+    return create_pipeline_engine(
+        manifest,
+        resolved_models,
+        cv2=cv2,
+        np=np,
+        detector_factory=yolo_factory,
+        classifier_factory=yolo_factory,
+    )
+
+
+def ready_message(engine):
+    manifest = engine.manifest
+    return {
+        "version": PROTOCOL_VERSION,
+        "type": "ready",
+        "detectorName": "bread-yolo-boxes",
+        "capabilities": {
+            "detect": True,
+            "classify": True,
+            "autoLabel": True,
+            "verifier": manifest.verifier["kind"] != "none",
+        },
+    }
+
+
+def _result_message(engine, request_id, result, payload):
+    manifest = getattr(engine, "manifest", None)
+    if manifest is None:
+        image = result.get("image") or {
+            "width": result["width"],
+            "height": result["height"],
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        pipeline_version = "bread-pipeline-v1"
+        policy_version = "bread-label-policy-v2"
+        model_hashes = {"detector": None, "classifier": None, "verifier": None}
+    else:
+        image = result["image"]
+        pipeline_version = manifest.pipeline_version
+        policy_version = manifest.policy_version
+        model_hashes = {
+            "detector": manifest.detector["sha256"],
+            "classifier": manifest.classifier["sha256"],
+            "verifier": manifest.verifier["sha256"],
+        }
+    return {
+        "version": PROTOCOL_VERSION,
+        "type": "result",
+        "requestId": request_id,
+        "pipelineVersion": pipeline_version,
+        "policyVersion": policy_version,
+        "detectorName": "bread-yolo-boxes",
+        "modelHashes": model_hashes,
+        "image": image,
+        "boxes": result["boxes"],
+        "stageErrors": result.get("stageErrors", []),
+    }
+
+
+def _validate_request_header(header):
+    version = header.get("version")
+    if type(version) is not int or version != PROTOCOL_VERSION:
+        raise ValueError("unsupported protocol version")
+    request_type = header.get("type")
+    if type(request_type) is not str or request_type not in {
+        "detect",
+        "classify",
+        "shutdown",
+    }:
+        raise ValueError("unsupported request type")
+    request_id = header.get("requestId")
+    if not isinstance(request_id, str) or not request_id:
+        raise ValueError("request ID must be a non-empty string")
+    if request_type != "classify":
+        return
+    boxes = header.get("boxes")
+    if not isinstance(boxes, list):
+        raise ValueError("classify boxes must be an array")
+    if len(boxes) > 100:
+        raise ValueError("classify accepts at most 100 boxes")
+    for item in boxes:
+        if not isinstance(item, dict):
+            raise ValueError("classify box must be an object with a valid ID")
+        identifier = item.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            raise ValueError("classify box ID must be a non-empty string")
+
+
 def serve(stdin, stdout, engine):
     while True:
         request = read_request(stdin)
         if request is None:
             return 0
         header, payload = request
-        request_id = str(header.get("requestId", ""))
-        if header.get("version") != PROTOCOL_VERSION:
-            raise ValueError("unsupported protocol version")
-        if header.get("type") == "shutdown":
+        _validate_request_header(header)
+        request_id = header["requestId"]
+        request_type = header.get("type")
+        if request_type == "shutdown":
             return 0
         try:
-            result = engine.detect_bytes(payload, header.get("maxProposals"))
-            write_json_frame(
-                stdout,
-                {
-                    "version": PROTOCOL_VERSION,
-                    "type": "result",
-                    "requestId": request_id,
-                    "image": {
-                        "width": result["width"],
-                        "height": result["height"],
-                    },
-                    "boxes": result["boxes"],
-                },
-            )
+            if request_type == "detect":
+                result = engine.detect_bytes(payload, header.get("maxProposals"))
+            elif request_type == "classify":
+                result = engine.classify_bytes(payload, header.get("boxes", []))
+            else:
+                raise ValueError("unsupported request type")
+            write_json_frame(stdout, _result_message(engine, request_id, result, payload))
         except DecodeError as error:
             write_json_frame(
                 stdout,
@@ -725,9 +834,10 @@ def _iou(a, b):
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Persistent CPU bread detector that emits coordinate-only boxes."
+        description="Persistent CPU bread detection and auto-label pipeline."
     )
-    parser.add_argument("--detector-model", required=True)
+    parser.add_argument("--pipeline-manifest")
+    parser.add_argument("--detector-model")
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--det-conf", type=float, default=0.40)
     parser.add_argument("--iou", type=float, default=0.55)
@@ -735,6 +845,15 @@ def main() -> int:
     parser.add_argument("--min-box-size", type=int, default=45)
     parser.add_argument("--max-area-ratio", type=float, default=0.38)
     args = parser.parse_args()
+
+    if args.pipeline_manifest:
+        manifest_path = Path(args.pipeline_manifest)
+    elif args.detector_model:
+        manifest_path = Path(args.detector_model).with_name(
+            "bread_pipeline_manifest.json"
+        )
+    else:
+        parser.error("--pipeline-manifest or --detector-model is required")
 
     try:
         with contextlib.redirect_stdout(sys.stderr):
@@ -747,20 +866,12 @@ def main() -> int:
 
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            engine = BreadBoxEngine(args, cv2, np, YOLO)
+            engine = load_runtime_engine(manifest_path, cv2, np, YOLO)
     except Exception as error:
-        print(f"Bread detector initialization failed: {error}", file=sys.stderr)
+        print(f"Bread pipeline initialization failed: {error}", file=sys.stderr)
         return 5
 
-    write_json_frame(
-        sys.stdout.buffer,
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "ready",
-            "detectorName": "bread-yolo-boxes",
-            "model": Path(args.detector_model).name,
-        },
-    )
+    write_json_frame(sys.stdout.buffer, ready_message(engine))
     return serve(sys.stdin.buffer, sys.stdout.buffer, engine)
 
 
