@@ -2,6 +2,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from tools.bread_training.catalog import Catalog
 from tools.bread_training.metrics import DetectorReport, GateDecision, LabelPolicy
 from tools.bread_training.run_selection import (
+    ClassifierPublication,
     ModelSelection,
     SelectionError,
     SelectionReport,
@@ -29,6 +31,8 @@ from tools.bread_training.run_selection import (
     _guard_output_path,
     _materialize_final_classifier_dataset,
     _publish_manifest,
+    _publish_manifest_with_classifier_cleanup,
+    _publish_content_addressed_classifier,
     _validate_classifier_provenance,
     _validate_catalog_sources,
     _write_json_atomic,
@@ -88,8 +92,11 @@ class RunSelectionTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.detector_path = self.root / "bread_yolov8n_1class_tray_v0_2.pt"
-        self.classifier_path = self.root / "bread_classifier_yolov8n_cls_v1.pt"
         self.detector_path.write_bytes(b"detector")
+        classifier_digest = hashlib.sha256(b"classifier").hexdigest()
+        self.classifier_path = (
+            self.root / f"bread_classifier_yolov8n_cls_v1_{classifier_digest}.pt"
+        )
         self.classifier_path.write_bytes(b"classifier")
 
     def tearDown(self):
@@ -249,6 +256,161 @@ class RunSelectionTest(unittest.TestCase):
         manifest_path.write_text(json.dumps(payload), encoding="utf-8")
         with self.assertRaisesRegex(SelectionError, "acceptMargin"):
             audit_manifest_contract(manifest_path)
+
+    def test_manifest_audit_requires_exact_content_addressed_classifier_name(self):
+        manifest_path = self.root / "bread_pipeline_manifest.json"
+        digest = _sha256(self.classifier_path)
+        invalid_names = (
+            "arbitrary.pt",
+            "bread_classifier_yolov8n_cls_v1.pt",
+            f"bread_classifier_yolov8n_cls_v1_{digest[:-1]}.pt",
+            f"bread_classifier_yolov8n_cls_v1_{digest.upper()}.pt",
+        )
+        for filename in invalid_names:
+            with self.subTest(filename=filename):
+                sibling = self.root / filename
+                sibling.write_bytes(self.classifier_path.read_bytes())
+                payload = build_manifest(self._selection())
+                payload["classifier"]["file"] = filename
+                manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaisesRegex(SelectionError, "content-addressed"):
+                    audit_manifest_contract(manifest_path)
+
+    def test_new_classifier_is_removed_for_every_manifest_publication_failure(self):
+        manifest_path = REPOSITORY_ROOT / "models" / "bread_pipeline_manifest.json"
+        previous = manifest_path.read_bytes()
+        models_root = manifest_path.parent
+
+        def fail_audit(_):
+            raise SelectionError("injected audit failure")
+
+        cases = ("serialization", "audit", "fsync", "replace")
+        for case in cases:
+            with self.subTest(case=case):
+                source = self.root / f"new-{case}.pt"
+                source.write_bytes(f"new-{case}".encode())
+                publication = _publish_content_addressed_classifier(
+                    source, models_root
+                )
+                self.assertTrue(publication.newly_published)
+                payload = build_manifest(self._selection())
+                audit_fn = audit_manifest_contract
+                patcher = None
+                if case == "serialization":
+                    payload = {"notSerializable": object()}
+                elif case == "audit":
+                    audit_fn = fail_audit
+                elif case == "fsync":
+                    patcher = patch(
+                        "tools.bread_training.run_selection.os.fsync",
+                        side_effect=OSError("injected fsync failure"),
+                    )
+                else:
+                    patcher = patch(
+                        "tools.bread_training.run_selection.os.replace",
+                        side_effect=OSError("injected replace failure"),
+                    )
+                context = patcher if patcher is not None else nullcontext()
+                with context:
+                    with self.assertRaises(Exception):
+                        _publish_manifest_with_classifier_cleanup(
+                            manifest_path,
+                            payload,
+                            publication,
+                            audit_fn=audit_fn,
+                        )
+                self.assertFalse(publication.path.exists())
+                self.assertEqual(manifest_path.read_bytes(), previous)
+                self.assertTrue(audit_manifest_contract(manifest_path)["ok"])
+
+    def test_cleanup_never_deletes_reused_or_previous_handoff_classifier(self):
+        manifest_path = REPOSITORY_ROOT / "models" / "bread_pipeline_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        previous_classifier = manifest_path.parent / manifest["classifier"]["file"]
+        publication = _publish_content_addressed_classifier(
+            previous_classifier, manifest_path.parent
+        )
+        self.assertFalse(publication.newly_published)
+        with self.assertRaisesRegex(SelectionError, "injected"):
+            _publish_manifest_with_classifier_cleanup(
+                manifest_path,
+                build_manifest(self._selection()),
+                publication,
+                audit_fn=lambda _: (_ for _ in ()).throw(
+                    SelectionError("injected audit failure")
+                ),
+            )
+        self.assertTrue(previous_classifier.exists())
+        self.assertTrue(audit_manifest_contract(manifest_path)["ok"])
+
+        unrelated_source = self.root / "preexisting-unrelated.pt"
+        unrelated_source.write_bytes(b"preexisting-unrelated")
+        first = _publish_content_addressed_classifier(
+            unrelated_source, manifest_path.parent
+        )
+        try:
+            reused = _publish_content_addressed_classifier(
+                unrelated_source, manifest_path.parent
+            )
+            self.assertTrue(first.newly_published)
+            self.assertFalse(reused.newly_published)
+            with self.assertRaisesRegex(SelectionError, "injected"):
+                _publish_manifest_with_classifier_cleanup(
+                    manifest_path,
+                    build_manifest(self._selection()),
+                    reused,
+                    audit_fn=lambda _: (_ for _ in ()).throw(
+                        SelectionError("injected audit failure")
+                    ),
+                )
+            self.assertTrue(reused.path.exists())
+            self.assertTrue(audit_manifest_contract(manifest_path)["ok"])
+        finally:
+            if first.path.exists():
+                first.path.unlink()
+
+        falsely_new = ClassifierPublication(previous_classifier, True)
+        with self.assertRaisesRegex(SelectionError, "cleanup failed"):
+            _publish_manifest_with_classifier_cleanup(
+                manifest_path,
+                build_manifest(self._selection()),
+                falsely_new,
+                audit_fn=lambda _: (_ for _ in ()).throw(
+                    SelectionError("injected audit failure")
+                ),
+            )
+        self.assertTrue(previous_classifier.exists())
+        self.assertTrue(audit_manifest_contract(manifest_path)["ok"])
+
+    def test_cleanup_failure_surfaces_without_damaging_previous_handoff(self):
+        manifest_path = REPOSITORY_ROOT / "models" / "bread_pipeline_manifest.json"
+        previous = manifest_path.read_bytes()
+        source = self.root / "cleanup-failure.pt"
+        source.write_bytes(b"cleanup-failure")
+        publication = _publish_content_addressed_classifier(source, manifest_path.parent)
+        original_unlink = Path.unlink
+
+        def fail_new_classifier_unlink(path, *args, **kwargs):
+            if path.resolve() == publication.path.resolve():
+                raise OSError("injected cleanup failure")
+            return original_unlink(path, *args, **kwargs)
+
+        try:
+            with patch.object(Path, "unlink", fail_new_classifier_unlink):
+                with self.assertRaisesRegex(SelectionError, "cleanup failed"):
+                    _publish_manifest_with_classifier_cleanup(
+                        manifest_path,
+                        build_manifest(self._selection()),
+                        publication,
+                        audit_fn=lambda _: (_ for _ in ()).throw(
+                            SelectionError("injected audit failure")
+                        ),
+                    )
+            self.assertEqual(manifest_path.read_bytes(), previous)
+            self.assertTrue(audit_manifest_contract(manifest_path)["ok"])
+        finally:
+            if publication.path.exists():
+                original_unlink(publication.path)
 
     def test_manifest_audit_rejects_non_exact_schema_contract(self):
         manifest_path = self.root / "bread_pipeline_manifest.json"
@@ -444,6 +606,9 @@ class RunSelectionTest(unittest.TestCase):
         weights.write_bytes(b"second")
         second = _classifier_deployment_path(self.root, weights)
         self.assertNotEqual(first, second)
+        second.write_bytes(b"tampered-existing")
+        with self.assertRaisesRegex(SelectionError, "mismatched bytes"):
+            _publish_content_addressed_classifier(weights, self.root)
 
     def test_manifest_publish_audit_failure_preserves_previous_bytes(self):
         manifest_path = REPOSITORY_ROOT / "models" / "bread_pipeline_manifest.json"
@@ -806,8 +971,13 @@ class RunSelectionTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            classifier = model_root / "bread_classifier_yolov8n_cls_v1.pt"
-            classifier.write_bytes(b"classifier")
+            classifier_bytes = b"classifier"
+            classifier_hash = hashlib.sha256(classifier_bytes).hexdigest()
+            classifier = (
+                model_root
+                / f"bread_classifier_yolov8n_cls_v1_{classifier_hash}.pt"
+            )
+            classifier.write_bytes(classifier_bytes)
             config = SelectionConfig(
                 raw_root=raw_root,
                 catalog_path=catalog,
@@ -820,7 +990,7 @@ class RunSelectionTest(unittest.TestCase):
             )
             with patch(
                 "tools.bread_training.run_selection._prepare_final_classifier",
-                return_value=classifier,
+                return_value=ClassifierPublication(classifier, False),
             ), patch(
                 "tools.bread_training.run_selection._guard_manifest_path",
                 return_value=config.manifest_path.resolve(),
@@ -850,7 +1020,7 @@ class RunSelectionTest(unittest.TestCase):
             def invoke_with_patches():
                 with patch(
                     "tools.bread_training.run_selection._prepare_final_classifier",
-                    return_value=classifier,
+                    return_value=ClassifierPublication(classifier, False),
                 ) as prepare_classifier, patch(
                     "tools.bread_training.run_selection._guard_manifest_path",
                     return_value=config.manifest_path.resolve(),
@@ -906,7 +1076,7 @@ class RunSelectionTest(unittest.TestCase):
             replacement_classifier.write_bytes(replacement_source.read_bytes())
             with patch(
                 "tools.bread_training.run_selection._prepare_final_classifier",
-                return_value=replacement_classifier,
+                return_value=ClassifierPublication(replacement_classifier, True),
             ), patch(
                 "tools.bread_training.run_selection._guard_manifest_path",
                 return_value=config.manifest_path.resolve(),

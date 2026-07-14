@@ -83,6 +83,12 @@ class SelectionConfig:
 
 
 @dataclass(frozen=True)
+class ClassifierPublication:
+    path: Path
+    newly_published: bool
+
+
+@dataclass(frozen=True)
 class ModelSelection:
     name: str
     path: Path
@@ -436,6 +442,13 @@ def audit_manifest_contract(manifest_path: Path) -> dict[str, Any]:
             raise SelectionError(f"{kind} sha256 mismatch")
     detector = payload["detector"]
     classifier = payload["classifier"]
+    expected_classifier_file = (
+        f"bread_classifier_yolov8n_cls_v1_{classifier['sha256']}.pt"
+    )
+    if classifier["file"] != expected_classifier_file:
+        raise SelectionError(
+            "classifier file must use the exact content-addressed sha256 name"
+        )
     for name, value in (
         ("detector confidence", detector.get("confidence")),
         ("detector iou", detector.get("iou")),
@@ -525,6 +538,55 @@ def _publish_manifest(
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()
+
+
+def _remove_new_classifier_orphan(
+    publication: ClassifierPublication, manifest_path: Path
+) -> None:
+    if not publication.newly_published:
+        return
+    target = _guard_manifest_path(manifest_path)
+    models_root = target.parent.resolve()
+    classifier_path = publication.path.resolve()
+    if classifier_path.parent != models_root:
+        raise SelectionError("classifier cleanup path must be directly inside models")
+    digest = sha256_file(classifier_path)
+    expected_name = f"bread_classifier_yolov8n_cls_v1_{digest}.pt"
+    if classifier_path.name != expected_name:
+        raise SelectionError("classifier cleanup path is not exact content-addressed name")
+    if target.exists():
+        audit_manifest_contract(target)
+        previous = _read_json(target, "previous pipeline manifest")
+        previous_file = previous.get("classifier", {}).get("file")
+        if previous_file == classifier_path.name:
+            raise SelectionError(
+                "classifier cleanup refuses to remove previous handoff weight"
+            )
+    try:
+        classifier_path.unlink()
+    except OSError as error:
+        raise SelectionError(
+            f"could not remove newly published classifier: {classifier_path}"
+        ) from error
+
+
+def _publish_manifest_with_classifier_cleanup(
+    manifest_path: Path,
+    payload: Mapping[str, Any],
+    publication: ClassifierPublication,
+    audit_fn: Callable[[Path], dict[str, Any]] = audit_manifest_contract,
+) -> dict[str, Any]:
+    try:
+        return _publish_manifest(manifest_path, payload, audit_fn=audit_fn)
+    except Exception:
+        if publication.newly_published:
+            try:
+                _remove_new_classifier_orphan(publication, manifest_path)
+            except Exception as cleanup_error:
+                raise SelectionError(
+                    "manifest publication failed and classifier cleanup failed"
+                ) from cleanup_error
+        raise
 
 
 def _read_json(path: Path, description: str) -> dict[str, Any]:
@@ -942,12 +1004,26 @@ def _classifier_deployment_path(model_root: Path, weights: Path) -> Path:
     )
 
 
+def _publish_content_addressed_classifier(
+    source: Path, model_root: Path
+) -> ClassifierPublication:
+    destination = _classifier_deployment_path(model_root, source)
+    source_hash = sha256_file(source)
+    if destination.exists():
+        if sha256_file(destination) != source_hash:
+            raise SelectionError(
+                "existing content-addressed classifier has mismatched bytes"
+            )
+        return ClassifierPublication(destination.resolve(), False)
+    return ClassifierPublication(_publish_model(source, destination), True)
+
+
 def _prepare_final_classifier(
     config: SelectionConfig,
     catalog_payload: Mapping[str, Any],
     epochs: int,
     progress: Callable[[str], None],
-) -> Path:
+) -> ClassifierPublication:
     final_root = config.output_root.resolve() / "final_classifier"
     dataset_root = final_root / "dataset"
     dataset_manifest_path = final_root / "dataset_manifest.json"
@@ -999,10 +1075,9 @@ def _prepare_final_classifier(
         progress(f"classifier phase=train-final-complete sha256={sha256_file(trained)}")
     else:
         progress(f"classifier phase=reuse-final sha256={sha256_file(trained)}")
-    destination = _classifier_deployment_path(
-        config.manifest_path.resolve().parent, trained
+    return _publish_content_addressed_classifier(
+        trained, config.manifest_path.resolve().parent
     )
-    return _publish_model(trained, destination)
 
 
 def _prepare_selected_detector(
@@ -1129,9 +1204,10 @@ def run_selection(
         )
     classifier_epochs = median_best_epoch(_classifier_best_epochs(config.classifier_root))
     progress(f"classifier phase=selection median-best-epoch={classifier_epochs}")
-    classifier_path = _prepare_final_classifier(
+    classifier_publication = _prepare_final_classifier(
         config, catalog_payload, classifier_epochs, progress
     )
+    classifier_path = classifier_publication.path
     classifier = ModelSelection(
         name="final_classifier_all_real",
         path=classifier_path,
@@ -1155,7 +1231,9 @@ def run_selection(
         synthetic_disabled_reason=SYNTHETIC_DISABLED_REASON,
     )
     manifest = build_manifest(selection)
-    audit = _publish_manifest(manifest_path, manifest)
+    audit = _publish_manifest_with_classifier_cleanup(
+        manifest_path, manifest, classifier_publication
+    )
     output_root.mkdir(parents=True, exist_ok=True)
     _write_json_atomic(
         output_root / "selection_report.json",
