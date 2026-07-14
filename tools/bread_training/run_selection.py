@@ -80,6 +80,7 @@ class SelectionConfig:
     classifier_root: Path
     output_root: Path
     manifest_path: Path
+    fast_detector_selection: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,15 @@ class ModelSelection:
     confidence: float
     iou: float
     median_latency_ms: float
+
+
+@dataclass(frozen=True)
+class FastDetectorHandoff:
+    selected: ModelSelection
+    initial_weights: Path
+    epochs: int
+    profile: Mapping[str, float | int]
+    decision: GateDecision
 
 
 @dataclass(frozen=True)
@@ -218,6 +228,123 @@ def choose_detector(
         )[1]
         return baseline, rejected
     return baseline, GateDecision(True, (), {"baseline_retained": True})
+
+
+def load_fast_detector_handoff(
+    selection_path: Path, candidate_root: Path
+) -> FastDetectorHandoff:
+    selection = _read_json(selection_path, "fast detector selection")
+    if selection.get("schemaVersion") != 1 or selection.get("selectionPolicy") != (
+        "misses_false_positives_iou_latency_v1"
+    ):
+        raise SelectionError("fast detector selection contract is invalid")
+    full_oof = selection.get("fullOof")
+    if not isinstance(full_oof, dict):
+        raise SelectionError("fast detector selection is missing full OOF results")
+    if type(full_oof.get("maxImageMisses")) is not int:
+        raise SelectionError("fast detector maxImageMisses must be an integer")
+    if int(full_oof["maxImageMisses"]) > 1:
+        raise SelectionError("fast detector full OOF contains an image with two misses")
+
+    winner = selection.get("winner")
+    if not isinstance(winner, str) or re.fullmatch(r"[a-z0-9_]+", winner) is None:
+        raise SelectionError("fast detector winner name is invalid")
+    winner_root = candidate_root.resolve() / winner
+    report_path = winner_root / "candidate_report.json"
+    if Path(str(full_oof.get("candidateReport", ""))).resolve() != report_path:
+        raise SelectionError("fast detector candidate report path is invalid")
+    report = _read_json(report_path, "fast detector candidate report")
+    if report.get("candidate") != winner:
+        raise SelectionError("fast detector candidate report names the wrong winner")
+
+    report_folds = report.get("folds")
+    artifacts = full_oof.get("artifacts")
+    if not isinstance(report_folds, list) or not isinstance(artifacts, list):
+        raise SelectionError("fast detector fold provenance is missing")
+    if len(report_folds) != 5 or len(artifacts) != 5:
+        raise SelectionError("fast detector handoff requires exactly five folds")
+    artifact_by_fold: dict[int, Mapping[str, Any]] = {}
+    for item in artifacts:
+        if not isinstance(item, dict) or type(item.get("fold")) is not int:
+            raise SelectionError("fast detector artifact fold is invalid")
+        fold = int(item["fold"])
+        if fold not in range(5) or fold in artifact_by_fold:
+            raise SelectionError("fast detector artifact folds must be exactly 0 through 4")
+        artifact_by_fold[fold] = item
+    if set(artifact_by_fold) != set(range(5)):
+        raise SelectionError("fast detector artifact folds must be exactly 0 through 4")
+
+    report_by_fold: dict[int, Mapping[str, Any]] = {}
+    for item in report_folds:
+        if not isinstance(item, dict) or type(item.get("fold")) is not int:
+            raise SelectionError("fast detector report fold is invalid")
+        fold = int(item["fold"])
+        report_by_fold[fold] = item
+    if set(report_by_fold) != set(range(5)):
+        raise SelectionError("fast detector report folds must be exactly 0 through 4")
+
+    for fold in range(5):
+        expected_artifact = winner_root / f"fold_{fold}_predictions.json"
+        item = artifact_by_fold[fold]
+        if Path(str(item.get("path", ""))).resolve() != expected_artifact:
+            raise SelectionError("fast detector artifact path is invalid")
+        artifact = _read_json(expected_artifact, "fast detector fold artifact")
+        expected_hash = str(item.get("modelSha256", ""))
+        if (
+            artifact.get("fold") != fold
+            or artifact.get("model_sha256") != expected_hash
+            or report_by_fold[fold].get("model_sha256") != expected_hash
+        ):
+            raise SelectionError("fast detector artifact provenance does not match")
+        weights = winner_root / f"fold_{fold}" / "weights" / "best.pt"
+        if sha256_file(weights) != expected_hash:
+            raise SelectionError("fast detector fold weights hash does not match")
+
+    initial_weights = Path(str(selection.get("initialWeights", ""))).resolve()
+    if sha256_file(initial_weights) != selection.get("initialWeightsSha256"):
+        raise SelectionError("fast detector initial weights hash does not match")
+    profile = selection.get("trainingProfile")
+    expected_profile_fields = {
+        "mosaic",
+        "closeMosaic",
+        "translate",
+        "scale",
+        "syntheticRatio",
+    }
+    if not isinstance(profile, dict) or set(profile) != expected_profile_fields:
+        raise SelectionError("fast detector training profile is invalid")
+    if type(profile["closeMosaic"]) is not int or int(profile["closeMosaic"]) < 0:
+        raise SelectionError("fast detector closeMosaic is invalid")
+    for field in ("mosaic", "translate", "scale", "syntheticRatio"):
+        if type(profile[field]) not in (int, float) or not math.isfinite(
+            float(profile[field])
+        ):
+            raise SelectionError(f"fast detector {field} is invalid")
+    if float(profile["syntheticRatio"]) != 0.0:
+        raise SelectionError("fast detector handoff must remain real-only")
+
+    best_epochs = report.get("best_epochs")
+    if not isinstance(best_epochs, list):
+        raise SelectionError("fast detector best epochs are missing")
+    epochs = median_best_epoch(best_epochs)
+    thresholds = tuple(float(item["confidence_threshold"]) for item in report_folds)
+    fold_zero_weights = winner_root / "fold_0" / "weights" / "best.pt"
+    selected = ModelSelection(
+        name=winner,
+        path=fold_zero_weights.resolve(),
+        sha256=sha256_file(fold_zero_weights),
+        report=_detector_report(report),
+        confidence=statistics.median(thresholds),
+        iou=0.7,
+        median_latency_ms=float(report["median_latency_ms"]),
+    )
+    return FastDetectorHandoff(
+        selected=selected,
+        initial_weights=initial_weights,
+        epochs=epochs,
+        profile={key: profile[key] for key in sorted(profile)},
+        decision=GateDecision(True, (), {"fast_ab_oof": True}),
+    )
 
 
 def median_best_epoch(values: Sequence[Any]) -> int:
@@ -1086,23 +1213,32 @@ def _prepare_selected_detector(
     candidates: Sequence[ModelSelection],
     catalog_payload: Mapping[str, Any],
     progress: Callable[[str], None],
+    fast_handoff: FastDetectorHandoff | None = None,
 ) -> ModelSelection:
     if selected.name == "current_detector":
         return selected
     report_path = config.candidate_root / selected.name / "candidate_report.json"
     payload = _read_json(report_path, "selected detector candidate report")
-    epochs = median_best_epoch(tuple(int(item) for item in payload["best_epochs"]))
+    epochs = (
+        fast_handoff.epochs
+        if fast_handoff is not None
+        else median_best_epoch(tuple(int(item) for item in payload["best_epochs"]))
+    )
     progress(f"detector phase=train-final candidate={selected.name} epochs={epochs}")
     dataset = build_detector_all_data(
         catalog_payload, config.output_root / "final_detector_dataset"
     )
     initial = (
-        config.manifest_path.parent / "bread_yolov8n_1class_tray_v0_2.pt"
-        if selected.name == "current_finetune_real"
-        else REPOSITORY_ROOT / "yolov8n.pt"
+        fast_handoff.initial_weights
+        if fast_handoff is not None
+        else (
+            config.manifest_path.parent / "bread_yolov8n_1class_tray_v0_2.pt"
+            if selected.name == "current_finetune_real"
+            else REPOSITORY_ROOT / "yolov8n.pt"
+        )
     )
     model = _yolo_class()(str(initial))
-    result = model.train(
+    training_arguments: dict[str, Any] = dict(
         data=str(dataset / "dataset.yaml"),
         imgsz=640,
         device=0,
@@ -1116,10 +1252,19 @@ def _prepare_selected_detector(
         name="train",
         exist_ok=True,
     )
+    if fast_handoff is not None:
+        training_arguments.update(
+            mosaic=float(fast_handoff.profile["mosaic"]),
+            close_mosaic=int(fast_handoff.profile["closeMosaic"]),
+            translate=float(fast_handoff.profile["translate"]),
+            scale=float(fast_handoff.profile["scale"]),
+        )
+    result = model.train(**training_arguments)
     trained = Path(result.save_dir) / "weights" / "last.pt"
     deployed = _publish_model(
         trained,
-        config.manifest_path.resolve().parent / f"bread_detector_{selected.name}_v1.pt",
+        config.manifest_path.resolve().parent
+        / f"bread_detector_{selected.name}_{'v2' if fast_handoff else 'v1'}.pt",
     )
     return ModelSelection(
         name=selected.name,
@@ -1165,14 +1310,21 @@ def run_selection(
     _validate_catalog_sources(catalog_payload, config.raw_root)
     baseline = _load_baseline(config.baseline_detector_report)
     candidates = _load_candidates(config.candidate_root)
-    selected, decision = choose_detector(baseline, candidates)
+    fast_handoff = None
+    if config.fast_detector_selection is not None:
+        fast_handoff = load_fast_detector_handoff(
+            config.fast_detector_selection, config.candidate_root
+        )
+        selected, decision = fast_handoff.selected, fast_handoff.decision
+    else:
+        selected, decision = choose_detector(baseline, candidates)
     progress(
         "detector phase=selection "
         f"selected={selected.name} accepted={decision.accepted} "
         f"failed_gates={','.join(decision.failed_gates) or 'none'}"
     )
     detector = _prepare_selected_detector(
-        config, selected, candidates, catalog_payload, progress
+        config, selected, candidates, catalog_payload, progress, fast_handoff
     )
     classifier_payload = _read_json(
         config.classifier_root / "classifier_report.json", "classifier OOF report"
@@ -1278,6 +1430,7 @@ def _selection_parser() -> argparse.ArgumentParser:
     parser.add_argument("--classifier-root", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--write-manifest", required=True, type=Path)
+    parser.add_argument("--fast-detector-selection", type=Path)
     return parser
 
 
@@ -1303,6 +1456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             classifier_root=args.classifier_root,
             output_root=args.output_root,
             manifest_path=args.write_manifest,
+            fast_detector_selection=args.fast_detector_selection,
         )
     )
     return 0

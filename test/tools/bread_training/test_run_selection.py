@@ -11,6 +11,7 @@ from tools.bread_training.catalog import Catalog
 from tools.bread_training.metrics import DetectorReport, GateDecision, LabelPolicy
 from tools.bread_training.run_selection import (
     ClassifierPublication,
+    FastDetectorHandoff,
     ModelSelection,
     SelectionError,
     SelectionReport,
@@ -21,6 +22,7 @@ from tools.bread_training.run_selection import (
     build_manifest,
     choose_detector,
     median_best_epoch,
+    load_fast_detector_handoff,
     main,
     reusable_final_classifier,
     run_selection,
@@ -88,6 +90,112 @@ def _fold_manifest_payload(fold: int):
 
 
 class RunSelectionTest(unittest.TestCase):
+    def test_fast_handoff_selects_winner_without_deprecated_baseline_gate(self):
+        candidate_root = self.root / "full_5fold"
+        winner_root = candidate_root / "candidate_b2_recall"
+        initial = self.root / "yolov8n.pt"
+        initial.write_bytes(b"coco-seed")
+        initial_hash = _sha256(initial)
+        folds = []
+        artifacts = []
+        for fold in range(5):
+            weights = winner_root / f"fold_{fold}" / "weights" / "best.pt"
+            weights.parent.mkdir(parents=True, exist_ok=True)
+            weights.write_bytes(f"fold-{fold}".encode("ascii"))
+            model_hash = _sha256(weights)
+            artifact = winner_root / f"fold_{fold}_predictions.json"
+            artifact.write_text(
+                json.dumps({"fold": fold, "model_sha256": model_hash}),
+                encoding="utf-8",
+            )
+            folds.append(
+                {
+                    "fold": fold,
+                    "confidence_threshold": 0.55,
+                    "model_sha256": model_hash,
+                }
+            )
+            artifacts.append(
+                {
+                    "fold": fold,
+                    "path": str(artifact.resolve()),
+                    "modelSha256": model_hash,
+                }
+            )
+        (winner_root / "candidate_report.json").write_text(
+            json.dumps(
+                {
+                    "candidate": "candidate_b2_recall",
+                    "metrics": {
+                        "recall": 0.99,
+                        "precision": 0.99,
+                        "map50_95": 0.95,
+                        "median_iou": 0.97,
+                        "median_area_ratio": 1.0,
+                    },
+                    "median_latency_ms": 120.0,
+                    "best_epochs": [50, 52, 54, 56, 58],
+                    "folds": folds,
+                }
+            ),
+            encoding="utf-8",
+        )
+        selection_path = self.root / "fast_selection.json"
+        selection_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "selectionPolicy": "misses_false_positives_iou_latency_v1",
+                    "winner": "candidate_b2_recall",
+                    "initialWeights": str(initial.resolve()),
+                    "initialWeightsSha256": initial_hash,
+                    "trainingProfile": {
+                        "mosaic": 0.5,
+                        "closeMosaic": 8,
+                        "translate": 0.1,
+                        "scale": 0.3,
+                        "syntheticRatio": 0.0,
+                    },
+                    "fullOof": {
+                        "maxImageMisses": 1,
+                        "candidateReport": str(
+                            (winner_root / "candidate_report.json").resolve()
+                        ),
+                        "artifacts": artifacts,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        handoff = load_fast_detector_handoff(selection_path, candidate_root)
+
+        self.assertIsInstance(handoff, FastDetectorHandoff)
+        self.assertEqual(handoff.selected.name, "candidate_b2_recall")
+        self.assertEqual(handoff.initial_weights, initial.resolve())
+        self.assertEqual(handoff.epochs, 54)
+        self.assertEqual(handoff.profile["closeMosaic"], 8)
+        self.assertTrue(handoff.decision.accepted)
+        self.assertEqual(handoff.decision.failed_gates, ())
+        self.assertEqual(handoff.decision.checks, {"fast_ab_oof": True})
+
+    def test_fast_handoff_rejects_catastrophic_full_oof_miss(self):
+        selection = self.root / "fast_selection.json"
+        selection.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "selectionPolicy": "misses_false_positives_iou_latency_v1",
+                    "winner": "candidate_b2_recall",
+                    "fullOof": {"maxImageMisses": 2},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(SelectionError, "two misses"):
+            load_fast_detector_handoff(selection, self.root / "full_5fold")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
