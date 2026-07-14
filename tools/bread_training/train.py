@@ -1916,6 +1916,12 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     candidate_oof.add_argument("--current", required=True, type=Path)
     candidate_oof.add_argument("--output", required=True, type=Path)
     candidate_oof.add_argument("--probe-epochs", type=int)
+    fast_ab = commands.add_parser("detector-fast-ab")
+    fast_ab.add_argument("--catalog", required=True, type=Path)
+    fast_ab.add_argument("--split", required=True, type=Path)
+    fast_ab.add_argument("--datasets", required=True, type=Path)
+    fast_ab.add_argument("--deprecated-seed", required=True, type=Path)
+    fast_ab.add_argument("--output", required=True, type=Path)
     classifier_oof = commands.add_parser("classifier-oof")
     classifier_oof.add_argument("--catalog", required=True, type=Path)
     classifier_oof.add_argument("--split", required=True, type=Path)
@@ -1959,6 +1965,30 @@ def main(argv: Iterable[str] | None = None) -> int:
                 f"median_latency_ms={report.median_latency_ms:.3f}"
             )
         print(f"total_elapsed_seconds={time.perf_counter() - started:.3f}")
+        return 0
+    if args.command == "detector-fast-ab":
+        if not args.deprecated_seed.is_file():
+            raise FileNotFoundError(
+                f"Deprecated detector seed does not exist: {args.deprecated_seed}"
+            )
+        _validate_candidate_cli_inputs(args.catalog, args.split, args.datasets)
+        from tools.bread_training.fast_detector_ab import FastAbConfig, run_fast_ab
+
+        result = run_fast_ab(
+            FastAbConfig(
+                current_weights=args.deprecated_seed,
+                fold_dataset_root=args.datasets,
+                output_root=_guard_output_root(args.output),
+            )
+        )
+        for summary in result.screen:
+            print(
+                f"screen={summary.name} misses={summary.total_misses} "
+                f"false_positives={summary.false_positives} "
+                f"max_image_misses={summary.max_image_misses} "
+                f"median_iou={summary.median_iou:.6f}"
+            )
+        print(f"winner={result.winner} selection={result.selection_path}")
         return 0
     if args.command == "classifier-oof":
         report_path = run_classifier_oof(
