@@ -1,7 +1,9 @@
 import importlib.util
+import hashlib
 import io
 import json
 import struct
+import sys
 import types
 import unittest
 from pathlib import Path
@@ -10,7 +12,12 @@ import cv2
 import numpy as np
 
 
-MODULE_PATH = Path(__file__).resolve().parents[2] / "tools" / "detectors" / "bread_box_worker.py"
+MODULE_PATH = (
+    Path(__file__).resolve().parents[2] / "tools" / "detectors" / "bread_box_worker.py"
+)
+PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 SPEC = importlib.util.spec_from_file_location("bread_box_worker", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 worker = importlib.util.module_from_spec(SPEC)
@@ -61,6 +68,129 @@ def png_bytes():
     success, encoded = cv2.imencode(".png", np.zeros((2, 2, 3), dtype=np.uint8))
     assert success
     return encoded.tobytes()
+
+
+def pipeline_png_bytes(width=100, height=80):
+    success, encoded = cv2.imencode(
+        ".png", np.zeros((height, width, 3), dtype=np.uint8)
+    )
+    assert success
+    return encoded.tobytes()
+
+
+class FakeTensor:
+    def __init__(self, values):
+        self.values = values
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return np.asarray(self.values, dtype=float)
+
+    def tolist(self):
+        return list(self.values)
+
+
+class DetectionBoxes:
+    def __init__(self, rows, confidences):
+        self.xyxy = FakeTensor(rows)
+        self.conf = FakeTensor(confidences)
+
+
+class DetectionResult:
+    def __init__(self, rows):
+        self.boxes = DetectionBoxes([row[:4] for row in rows], [row[4] for row in rows])
+
+
+class PipelineDetector:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def predict(self, image, **kwargs):
+        self.calls.append((image, kwargs))
+        return [DetectionResult(self.rows)]
+
+
+class ClassifierResult:
+    def __init__(self, scores):
+        self.probs = types.SimpleNamespace(data=FakeTensor(scores))
+
+
+class BatchClassifier:
+    def __init__(self, scores):
+        self.scores = scores
+        self.calls = []
+
+    def predict(self, crops, **kwargs):
+        self.calls.append((crops, kwargs))
+        return [ClassifierResult(scores) for scores in self.scores]
+
+
+class FailingClassifier:
+    def predict(self, crops, **kwargs):
+        raise RuntimeError("classifier unavailable")
+
+
+class RecordingVerifier:
+    def __init__(self):
+        self.crops = []
+
+    def verify(self, crop, top_label_id, candidates):
+        self.crops.append(crop)
+        return {"labelId": top_label_id, "score": 0.99, "margin": 0.9}
+
+
+class CropOnlyVerifier:
+    def __init__(self):
+        self.crops = []
+
+    def verify(self, crop):
+        self.crops.append(crop)
+        return {"labelId": 1, "score": 0.99, "margin": 0.9}
+
+
+def pipeline_manifest(*, verifier_kind="none", duplicate_iou=0.95):
+    return types.SimpleNamespace(
+        detector={"imgsz": 640, "confidence": 0.4, "iou": 0.55},
+        classifier={
+            "imgsz": 224,
+            "acceptConfidence": 0.8,
+            "acceptMargin": 0.2,
+            "conservativeClasses": [],
+        },
+        verifier={
+            "kind": verifier_kind,
+            "scoreThreshold": None if verifier_kind == "none" else 0.9,
+            "marginThreshold": None if verifier_kind == "none" else 0.2,
+        },
+        quality={
+            "minBoxSize": 1,
+            "maxAreaRatio": 1.0,
+            "edgeMarginPx": 0,
+            "duplicateIou": duplicate_iou,
+        },
+        labels=(
+            types.SimpleNamespace(id=1, name="one"),
+            types.SimpleNamespace(id=2, name="two"),
+            types.SimpleNamespace(id=3, name="three"),
+        ),
+    )
+
+
+def pipeline_engine(detector, classifier, verifier=None, *, manifest=None):
+    return worker.BreadInferenceEngine(
+        manifest
+        or pipeline_manifest(
+            verifier_kind="embedding" if verifier is not None else "none"
+        ),
+        cv2,
+        np,
+        detector,
+        classifier,
+        verifier,
+    )
 
 
 class EmptyBoxesResult:
@@ -139,8 +269,7 @@ class WorkerProtocolTest(unittest.TestCase):
             engine_args(), cv2, np, lambda _model_path: detector
         )
         stdin = io.BytesIO(
-            request_frame("bad", b"not an image")
-            + request_frame("good", png_bytes())
+            request_frame("bad", b"not an image") + request_frame("good", png_bytes())
         )
         stdout = io.BytesIO()
 
@@ -186,9 +315,7 @@ class WorkerProtocolTest(unittest.TestCase):
 
         engine = worker.BreadBoxEngine(engine_args(), cv2, np, counting_factory)
         payload = png_bytes()
-        stdin = io.BytesIO(
-            request_frame("1", payload) + request_frame("2", payload)
-        )
+        stdin = io.BytesIO(request_frame("1", payload) + request_frame("2", payload))
         stdout = io.BytesIO()
 
         worker.serve(stdin, stdout, engine)
@@ -224,7 +351,9 @@ class BreadBoxWorkerPostprocessTest(unittest.TestCase):
         self.assertIn(long_bread, filtered)
         self.assertEqual(len(filtered), 2)
 
-    def test_remove_aggregate_boxes_drops_low_confidence_box_with_one_large_overlap(self):
+    def test_remove_aggregate_boxes_drops_low_confidence_box_with_one_large_overlap(
+        self,
+    ):
         aggregate = box(100, 100, 500, 500, confidence=0.52)
         boxes = [
             aggregate,
@@ -248,6 +377,212 @@ class BreadBoxWorkerPostprocessTest(unittest.TestCase):
         filtered = worker._remove_aggregate_boxes(boxes)
 
         self.assertIn(high_confidence, filtered)
+
+
+class BreadInferenceEngineTest(unittest.TestCase):
+    def test_classifier_receives_one_crop_batch_and_verifier_only_ambiguous_crop(self):
+        detector = PipelineDetector([(2, 3, 30, 32, 0.9), (40, 5, 75, 45, 0.8)])
+        classifier = BatchClassifier([(0.95, 0.03, 0.02), (0.55, 0.4, 0.05)])
+        verifier = RecordingVerifier()
+        engine = pipeline_engine(detector, classifier, verifier)
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(len(classifier.calls), 1)
+        crops, kwargs = classifier.calls[0]
+        self.assertEqual(len(crops), 2)
+        self.assertEqual(kwargs["batch"], 2)
+        self.assertEqual(len(verifier.crops), 1)
+        self.assertEqual(
+            [item["label"]["state"] for item in result["boxes"]],
+            ["accepted", "accepted"],
+        )
+
+    def test_none_verifier_manifest_skips_verifier_construction(self):
+        calls = []
+        manifest = pipeline_manifest(verifier_kind="none")
+        resolved = types.SimpleNamespace(
+            detector_path=Path("detector.pt"),
+            classifier_path=Path("classifier.pt"),
+            classifier_error=None,
+            verifier_path=None,
+            verifier_error=None,
+        )
+
+        engine = worker.create_pipeline_engine(
+            manifest,
+            resolved,
+            cv2=cv2,
+            np=np,
+            detector_factory=lambda _path: PipelineDetector(
+                [(2, 3, 30, 32, 0.9), (40, 5, 75, 45, 0.8)]
+            ),
+            classifier_factory=lambda _path: BatchClassifier(
+                [(0.95, 0.03, 0.02), (0.55, 0.4, 0.05)]
+            ),
+            verifier_factory=lambda path, specification: calls.append(
+                (path, specification)
+            ),
+        )
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(calls, [])
+        self.assertIsNone(engine.verifier)
+        self.assertEqual(result["boxes"][1]["label"]["state"], "review")
+
+    def test_crop_only_verifier_receives_only_ambiguous_crop(self):
+        verifier = CropOnlyVerifier()
+        engine = pipeline_engine(
+            PipelineDetector([(2, 3, 30, 32, 0.9), (40, 5, 75, 45, 0.8)]),
+            BatchClassifier([(0.95, 0.03, 0.02), (0.55, 0.4, 0.05)]),
+            verifier,
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(len(verifier.crops), 1)
+        self.assertEqual(result["boxes"][1]["label"]["state"], "accepted")
+
+    def test_classifier_batch_is_capped_at_sixteen(self):
+        rows = [(index * 2, 5, index * 2 + 1, 10, 0.9) for index in range(17)]
+        classifier = BatchClassifier([(0.95, 0.03, 0.02)] * 17)
+        engine = pipeline_engine(PipelineDetector(rows), classifier)
+
+        engine.detect_bytes(pipeline_png_bytes(width=100, height=20))
+
+        self.assertEqual(classifier.calls[0][1]["batch"], 16)
+
+    def test_manifest_factory_loads_detector_and_classifier_once(self):
+        detector_calls = []
+        classifier_calls = []
+        manifest = pipeline_manifest()
+        resolved = types.SimpleNamespace(
+            detector_path=Path("detector.pt"),
+            classifier_path=Path("classifier.pt"),
+            classifier_error=None,
+            verifier_path=None,
+            verifier_error=None,
+        )
+        detector = PipelineDetector([])
+        classifier = BatchClassifier([])
+        engine = worker.create_pipeline_engine(
+            manifest,
+            resolved,
+            cv2=cv2,
+            np=np,
+            detector_factory=lambda path: detector_calls.append(path) or detector,
+            classifier_factory=lambda path: classifier_calls.append(path) or classifier,
+        )
+
+        engine.detect_bytes(pipeline_png_bytes())
+        engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(detector_calls, [Path("detector.pt")])
+        self.assertEqual(classifier_calls, [Path("classifier.pt")])
+
+    def test_classifier_failure_preserves_gray_boxes_and_stage_error(self):
+        engine = pipeline_engine(
+            PipelineDetector([(2, 3, 30, 32, 0.9), (40, 5, 75, 45, 0.8)]),
+            FailingClassifier(),
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(len(result["boxes"]), 2)
+        self.assertTrue(
+            all(item["label"]["state"] == "unavailable" for item in result["boxes"])
+        )
+        self.assertEqual(result["stageErrors"][0]["stage"], "classifier")
+
+    def test_missing_classifier_preserves_gray_boxes(self):
+        engine = worker.BreadInferenceEngine(
+            pipeline_manifest(),
+            cv2,
+            np,
+            PipelineDetector([(2, 3, 30, 32, 0.9)]),
+            None,
+            None,
+            classifier_error="classifier weights missing",
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(result["boxes"][0]["label"]["state"], "unavailable")
+        self.assertEqual(result["stageErrors"][0]["stage"], "classifier")
+
+    def test_classify_request_uses_supplied_original_pixel_boxes_and_ids(self):
+        engine = pipeline_engine(
+            PipelineDetector([]), BatchClassifier([(0.95, 0.03, 0.02)])
+        )
+
+        result = engine.classify_bytes(
+            pipeline_png_bytes(),
+            [{"id": "manual-1", "x": 2, "y": 3, "width": 10, "height": 11}],
+        )
+
+        self.assertEqual(result["boxes"][0]["id"], "manual-1")
+        self.assertEqual(result["boxes"][0]["x"], 2)
+        self.assertEqual(engine.detector.calls, [])
+
+    def test_finite_boundary_overrun_is_clamped_and_marked_for_review(self):
+        engine = pipeline_engine(
+            PipelineDetector([(-0.2, 2, 20, 20, 0.9)]),
+            BatchClassifier([(0.95, 0.03, 0.02)]),
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(result["boxes"][0]["x"], 0)
+        self.assertIn("edge_clipped", result["boxes"][0]["label"]["reviewReasons"])
+
+    def test_nonfinite_and_nonpositive_boxes_are_discarded(self):
+        engine = pipeline_engine(
+            PipelineDetector([(float("nan"), 2, 20, 20, 0.9), (5, 5, 5, 10, 0.8)]),
+            BatchClassifier([]),
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(result["boxes"], [])
+
+    def test_request_bytes_are_hashed(self):
+        payload = pipeline_png_bytes()
+        engine = pipeline_engine(PipelineDetector([]), BatchClassifier([]))
+
+        result = engine.detect_bytes(payload)
+
+        self.assertEqual(result["image"]["sha256"], hashlib.sha256(payload).hexdigest())
+
+    def test_supplied_box_clamping_preserves_id_and_adds_edge_review(self):
+        engine = pipeline_engine(
+            PipelineDetector([]), BatchClassifier([(0.95, 0.03, 0.02)])
+        )
+
+        result = engine.classify_bytes(
+            pipeline_png_bytes(),
+            [{"id": "manual", "x": 90, "y": 70, "width": 20, "height": 20}],
+        )
+
+        self.assertEqual(result["boxes"][0]["id"], "manual")
+        self.assertEqual(result["boxes"][0]["width"], 10)
+        self.assertIn("edge_clipped", result["boxes"][0]["label"]["reviewReasons"])
+
+    def test_duplicate_reason_is_applied_to_survivors_after_nms(self):
+        engine = pipeline_engine(
+            PipelineDetector([(5, 5, 35, 35, 0.9), (10, 10, 40, 40, 0.8)]),
+            BatchClassifier([(0.95, 0.03, 0.02), (0.95, 0.03, 0.02)]),
+            manifest=pipeline_manifest(duplicate_iou=0.5),
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(len(result["boxes"]), 2)
+        self.assertTrue(
+            all(
+                "possible_duplicate" in item["label"]["reviewReasons"]
+                for item in result["boxes"]
+            )
+        )
 
 
 if __name__ == "__main__":

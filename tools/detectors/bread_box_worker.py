@@ -1,9 +1,25 @@
 import argparse
 import contextlib
+import hashlib
+import inspect
 import json
+import math
 import struct
 import sys
 from pathlib import Path
+
+try:
+    from tools.detectors.bread_label_policy import (
+        classify_policy,
+        is_ambiguous_scores,
+        normalized_scores,
+    )
+except ModuleNotFoundError:  # Direct execution from tools/detectors.
+    from bread_label_policy import (  # type: ignore[no-redef]
+        classify_policy,
+        is_ambiguous_scores,
+        normalized_scores,
+    )
 
 
 PROTOCOL_VERSION = 1
@@ -43,9 +59,9 @@ def read_request(stream):
 
 
 def write_json_frame(stream, payload):
-    encoded = json.dumps(
-        payload, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
     if len(encoded) > MAX_RESPONSE_BYTES:
         raise ValueError("response exceeds 1 MiB")
     stream.write(struct.pack(">I", len(encoded)))
@@ -94,6 +110,211 @@ class BreadBoxEngine:
             "height": image_height,
             "boxes": [_json_box(item) for item in boxes],
         }
+
+
+class BreadInferenceEngine:
+    """Manifest-driven detector and crop-classifier pipeline.
+
+    Model objects are injected after construction by the factory and are retained
+    for the lifetime of the worker. Coordinates entering and leaving this class
+    are always original-image pixels.
+    """
+
+    def __init__(
+        self,
+        manifest,
+        cv2,
+        np,
+        detector,
+        classifier,
+        verifier,
+        *,
+        classifier_error=None,
+        verifier_error=None,
+    ):
+        self.manifest = manifest
+        self.cv2 = cv2
+        self.np = np
+        self.detector = detector
+        self.classifier = classifier
+        self.verifier = verifier
+        self.classifier_error = classifier_error
+        self.verifier_error = verifier_error
+
+    def detect_bytes(self, payload, max_proposals=None):
+        image = self._decode(payload)
+        image_height, image_width = image.shape[:2]
+        with contextlib.redirect_stdout(sys.stderr):
+            detection = self.detector.predict(
+                image,
+                imgsz=self.manifest.detector["imgsz"],
+                conf=self.manifest.detector["confidence"],
+                iou=self.manifest.detector["iou"],
+                device="cpu",
+                verbose=False,
+            )[0]
+        boxes = _pipeline_detection_boxes(
+            detection, image_width=image_width, image_height=image_height
+        )
+        boxes = _nms(boxes, iou_threshold=0.85)
+        boxes.sort(key=lambda item: (item["xyxy"][1], item["xyxy"][0]))
+        if max_proposals is not None:
+            boxes = boxes[: max(0, int(max_proposals))]
+        return self._classify_result(payload, image, boxes)
+
+    def classify_bytes(self, payload, boxes):
+        image = self._decode(payload)
+        image_height, image_width = image.shape[:2]
+        normalized = []
+        for item in boxes:
+            box = _supplied_pipeline_box(
+                item, image_width=image_width, image_height=image_height
+            )
+            if box is not None:
+                normalized.append(box)
+        return self._classify_result(payload, image, normalized)
+
+    def _decode(self, payload):
+        encoded = self.np.frombuffer(payload, dtype=self.np.uint8)
+        try:
+            image = self.cv2.imdecode(encoded, self.cv2.IMREAD_COLOR)
+        except self.cv2.error as error:
+            raise DecodeError("Image could not be decoded.") from error
+        if image is None:
+            raise DecodeError("Image could not be decoded.")
+        return image
+
+    def _classify_result(self, payload, image, boxes):
+        image_height, image_width = image.shape[:2]
+        decisions, stage_errors = self._classify_crops(
+            image, boxes, image_width=image_width, image_height=image_height
+        )
+        json_boxes = []
+        for box, decision in zip(boxes, decisions):
+            label = decision
+            if box.get("edge_clipped"):
+                label = _add_review_reason(label, "edge_clipped")
+            json_boxes.append(_json_pipeline_box(box, label))
+        _apply_duplicate_review(
+            json_boxes, float(self.manifest.quality["duplicateIou"])
+        )
+        digest = hashlib.sha256(payload).hexdigest()
+        return {
+            # Keep these fields for the existing v1 serve adapter until Task 4.
+            "width": image_width,
+            "height": image_height,
+            "image": {
+                "width": image_width,
+                "height": image_height,
+                "sha256": digest,
+            },
+            "boxes": json_boxes,
+            "stageErrors": stage_errors,
+        }
+
+    def _classify_crops(self, image, boxes, *, image_width, image_height):
+        if not boxes:
+            return [], []
+        if self.classifier is None:
+            message = self.classifier_error or "classifier unavailable"
+            return (
+                [_unavailable_label(message) for _ in boxes],
+                [_stage_error("classifier", message)],
+            )
+        crops = [_crop_box(image, item["xyxy"]) for item in boxes]
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                results = self.classifier.predict(
+                    crops,
+                    imgsz=self.manifest.classifier["imgsz"],
+                    batch=min(16, len(crops)),
+                    verbose=False,
+                    device="cpu",
+                )
+            if len(results) != len(boxes):
+                raise RuntimeError("classifier returned an unexpected result count")
+            decisions = []
+            verifier_was_needed = False
+            for box, crop, result in zip(boxes, crops, results):
+                raw_scores = result.probs.data
+                if hasattr(raw_scores, "cpu"):
+                    raw_scores = raw_scores.cpu()
+                scores = normalized_scores(raw_scores, self.manifest.labels)
+                ambiguous = is_ambiguous_scores(scores, self.manifest)
+                verifier = None
+                if ambiguous:
+                    verifier_was_needed = True
+                    if self.verifier is not None:
+
+                        def verifier(top, candidates, crop=crop):
+                            return _call_crop_verifier(
+                                self.verifier, crop, top, candidates
+                            )
+
+                decision = classify_policy(
+                    scores,
+                    _policy_box(box),
+                    (image_width, image_height),
+                    self.manifest,
+                    verifier=verifier,
+                ).to_json()
+                decisions.append(decision)
+            errors = []
+            if verifier_was_needed and self.verifier_error:
+                errors.append(_stage_error("verifier", self.verifier_error))
+            return decisions, errors
+        except Exception as error:
+            message = str(error) or error.__class__.__name__
+            return (
+                [_unavailable_label(message) for _ in boxes],
+                [_stage_error("classifier", message)],
+            )
+
+
+def create_pipeline_engine(
+    manifest,
+    resolved_models,
+    *,
+    cv2,
+    np,
+    detector_factory,
+    classifier_factory,
+    verifier_factory=None,
+):
+    """Construct each configured model at most once for one worker lifetime."""
+
+    detector = detector_factory(resolved_models.detector_path)
+    classifier = None
+    classifier_error = resolved_models.classifier_error
+    if resolved_models.classifier_path is not None:
+        try:
+            classifier = classifier_factory(resolved_models.classifier_path)
+        except Exception as error:
+            classifier_error = str(error) or error.__class__.__name__
+
+    verifier = None
+    verifier_error = None
+    # This branch deliberately precedes any verifier factory call. A `none`
+    # manifest must not import, resolve, or construct verifier dependencies.
+    if manifest.verifier["kind"] != "none":
+        verifier_error = resolved_models.verifier_error
+        if resolved_models.verifier_path is not None:
+            try:
+                if verifier_factory is None:
+                    raise RuntimeError("verifier factory unavailable")
+                verifier = verifier_factory(resolved_models.verifier_path)
+            except Exception as error:
+                verifier_error = str(error) or error.__class__.__name__
+    return BreadInferenceEngine(
+        manifest,
+        cv2,
+        np,
+        detector,
+        classifier,
+        verifier,
+        classifier_error=classifier_error,
+        verifier_error=verifier_error,
+    )
 
 
 def serve(stdin, stdout, engine):
@@ -194,6 +415,180 @@ def _json_box(box):
         "height": round(float(y2 - y1), 2),
         "confidence": box["confidence"],
     }
+
+
+def _pipeline_detection_boxes(result, *, image_width, image_height):
+    if result.boxes is None:
+        return []
+    rows = result.boxes.xyxy.cpu().numpy()
+    confidences = result.boxes.conf.cpu().numpy()
+    boxes = []
+    for index, row in enumerate(rows):
+        values = tuple(float(value) for value in row)
+        if len(values) != 4 or not all(math.isfinite(value) for value in values):
+            continue
+        confidence = float(confidences[index])
+        if not math.isfinite(confidence):
+            continue
+        clamped, changed = _clamp_xyxy(
+            values, image_width=image_width, image_height=image_height
+        )
+        if clamped[2] <= clamped[0] or clamped[3] <= clamped[1]:
+            continue
+        boxes.append(
+            {
+                "id": f"proposal-{index + 1}",
+                "xyxy": clamped,
+                "confidence": round(confidence, 4),
+                "edge_clipped": changed,
+            }
+        )
+    return boxes
+
+
+def _supplied_pipeline_box(item, *, image_width, image_height):
+    try:
+        values = (
+            _finite_number(item["x"]),
+            _finite_number(item["y"]),
+            _finite_number(item["x"]) + _finite_number(item["width"]),
+            _finite_number(item["y"]) + _finite_number(item["height"]),
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    clamped, changed = _clamp_xyxy(
+        values, image_width=image_width, image_height=image_height
+    )
+    if clamped[2] <= clamped[0] or clamped[3] <= clamped[1]:
+        return None
+    return {
+        "id": item.get("id"),
+        "xyxy": clamped,
+        "confidence": item.get("confidence"),
+        "edge_clipped": changed,
+    }
+
+
+def _finite_number(value):
+    if type(value) not in (int, float):
+        raise ValueError("coordinate must be numeric")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("coordinate must be finite")
+    return number
+
+
+def _clamp_xyxy(values, *, image_width, image_height):
+    x1, y1, x2, y2 = values
+    clamped = (
+        max(0.0, min(x1, float(image_width))),
+        max(0.0, min(y1, float(image_height))),
+        max(0.0, min(x2, float(image_width))),
+        max(0.0, min(y2, float(image_height))),
+    )
+    return clamped, clamped != tuple(values)
+
+
+def _crop_box(image, xyxy):
+    x1, y1, x2, y2 = xyxy
+    return image[
+        int(math.floor(y1)) : int(math.ceil(y2)),
+        int(math.floor(x1)) : int(math.ceil(x2)),
+    ]
+
+
+def _call_crop_verifier(verifier, crop, top_label_id, candidates):
+    target = getattr(verifier, "verify", None)
+    if target is None:
+        target = getattr(verifier, "predict", verifier)
+    if not callable(target):
+        raise TypeError("verifier must be callable")
+    try:
+        signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        return target(crop, top_label_id, candidates)
+    for arguments in (
+        (crop, top_label_id, candidates),
+        (crop, top_label_id),
+        (crop,),
+    ):
+        try:
+            signature.bind(*arguments)
+        except TypeError:
+            continue
+        return target(*arguments)
+    raise TypeError("verifier has an unsupported call signature")
+
+
+def _policy_box(box):
+    x1, y1, x2, y2 = box["xyxy"]
+    return {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
+
+
+def _json_pipeline_box(box, label):
+    x1, y1, x2, y2 = box["xyxy"]
+    return {
+        "id": box.get("id"),
+        "x": round(float(x1), 2),
+        "y": round(float(y1), 2),
+        "width": round(float(x2 - x1), 2),
+        "height": round(float(y2 - y1), 2),
+        "confidence": box.get("confidence"),
+        "label": label,
+    }
+
+
+def _unavailable_label(message):
+    return {
+        "state": "unavailable",
+        "labelId": None,
+        "suggestedLabelId": None,
+        "candidates": [],
+        "reviewReasons": ["classifier_unavailable"],
+        "embeddingUsed": False,
+        "message": message,
+    }
+
+
+def _stage_error(stage, message):
+    return {"stage": stage, "message": message}
+
+
+def _add_review_reason(label, reason):
+    result = dict(label)
+    reasons = list(result.get("reviewReasons", []))
+    if reason not in reasons:
+        reasons.append(reason)
+    if result.get("state") == "accepted":
+        result["state"] = "review"
+        result["suggestedLabelId"] = result.get("labelId")
+        result["labelId"] = None
+    result["reviewReasons"] = reasons
+    return result
+
+
+def _apply_duplicate_review(boxes, threshold):
+    overlaps = set()
+    internal = []
+    for item in boxes:
+        internal.append(
+            {
+                "xyxy": (
+                    item["x"],
+                    item["y"],
+                    item["x"] + item["width"],
+                    item["y"] + item["height"],
+                )
+            }
+        )
+    for left in range(len(internal)):
+        for right in range(left + 1, len(internal)):
+            if _iou(internal[left], internal[right]) >= threshold:
+                overlaps.update((left, right))
+    for index in overlaps:
+        boxes[index]["label"] = _add_review_reason(
+            boxes[index]["label"], "possible_duplicate"
+        )
 
 
 def _nms(boxes, *, iou_threshold):
