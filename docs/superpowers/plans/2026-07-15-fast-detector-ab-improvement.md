@@ -65,9 +65,8 @@ def test_candidate_runner_trains_only_requested_folds(self):
 Run:
 
 ```powershell
-runtime\python\oof_eval\Scripts\python.exe -m unittest `
-  test.tools.bread_training.test_detector_candidates.DetectorCandidateTest.test_fast_candidate_matrix_has_fixed_real_only_profiles `
-  test.tools.bread_training.test_detector_candidates.DetectorCandidateTest.test_candidate_runner_trains_only_requested_folds -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_detector_candidates.py -v
 ```
 
 Expected: imports or fields fail because fast profiles and selectable folds do not exist.
@@ -141,7 +140,8 @@ Add `"folds": list(config.folds)` and the four numeric profile values to `_train
 Run:
 
 ```powershell
-runtime\python\oof_eval\Scripts\python.exe -m unittest test.tools.bread_training.test_detector_candidates -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_detector_candidates.py -v
 ```
 
 Expected: all tests pass.
@@ -196,9 +196,8 @@ def test_threshold_tie_prefers_fewer_false_positives_then_higher_iou(self):
 Run:
 
 ```powershell
-runtime\python\oof_eval\Scripts\python.exe -m unittest `
-  test.tools.bread_training.test_train.DetectorTrainingTest.test_threshold_prefers_no_catastrophic_image_miss_over_higher_f1 `
-  test.tools.bread_training.test_train.DetectorTrainingTest.test_threshold_tie_prefers_fewer_false_positives_then_higher_iou -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_train.py -v
 ```
 
 Expected: `select_operational_threshold` is missing.
@@ -257,9 +256,10 @@ Replace only detector candidate threshold selection; classifier policy calibrati
 Run:
 
 ```powershell
-runtime\python\oof_eval\Scripts\python.exe -m unittest `
-  test.tools.bread_training.test_train `
-  test.tools.bread_training.test_detector_candidates -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_train.py -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_detector_candidates.py -v
 ```
 
 Expected: all tests pass and artifacts declare `miss_first_v1`.
@@ -313,7 +313,8 @@ def test_orchestrator_runs_two_screens_but_only_one_full_oof(self):
 Run:
 
 ```powershell
-runtime\python\oof_eval\Scripts\python.exe -m unittest test.tools.bread_training.test_fast_detector_ab -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_fast_detector_ab.py -v
 ```
 
 Expected: module import fails.
@@ -360,10 +361,12 @@ The command validates the existing catalog/split/fold manifests before training 
 Run:
 
 ```powershell
-runtime\python\oof_eval\Scripts\python.exe -m unittest `
-  test.tools.bread_training.test_fast_detector_ab `
-  test.tools.bread_training.test_detector_candidates `
-  test.tools.bread_training.test_train -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_fast_detector_ab.py -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_detector_candidates.py -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_train.py -v
 ```
 
 Expected: all tests pass.
@@ -435,10 +438,8 @@ test('default service resolves the pipeline manifest instead of a detector filen
 Run:
 
 ```powershell
-runtime\python\oof_eval\Scripts\python.exe -m unittest `
-  test.tools.bread_training.test_run_selection.RunSelectionTest.test_fast_selection_bypasses_deprecated_baseline_gate `
-  test.tools.bread_training.test_run_selection.RunSelectionTest.test_final_detector_uses_winner_initial_weights_and_profile `
-  test.tools.bread_training.test_run_selection.RunSelectionTest.test_manifest_no_longer_names_deprecated_detector -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_run_selection.py -v
 ```
 
 Expected: configuration and fast winner loading are missing.
@@ -478,9 +479,10 @@ Remove every hard-coded detector filename from packaging. In `windows/CMakeLists
 Run:
 
 ```powershell
-runtime\python\oof_eval\Scripts\python.exe -m unittest `
-  test.tools.bread_training.test_run_selection `
-  test.tools.test_bread_pipeline_manifest -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_run_selection.py -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools -p test_bread_pipeline_manifest.py -v
 flutter test test/detector/bread_worker_client_test.dart test/detector/auto_box_service_test.dart test/packaging/installer_script_test.dart
 ```
 
@@ -531,7 +533,8 @@ def test_collect_source_images_uses_oof_predictions_from_all_folds(self):
 Run:
 
 ```powershell
-runtime\python\oof_eval\Scripts\python.exe -m unittest test.tools.bread_training.test_visualize_detector_oof -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_visualize_detector_oof.py -v
 ```
 
 Expected: module import fails.
@@ -551,7 +554,8 @@ It writes `contact_sheet.jpg` and `per_image_metrics.csv` below `--output` and f
 - [ ] **Step 3: Run and commit visualization tests**
 
 ```powershell
-runtime\python\oof_eval\Scripts\python.exe -m unittest test.tools.bread_training.test_visualize_detector_oof -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools/bread_training -p test_visualize_detector_oof.py -v
 git add tools/bread_training/visualize_detector_oof.py test/tools/bread_training/test_visualize_detector_oof.py
 git commit -m "feat: visualize detector OOF results"
 ```
@@ -611,7 +615,8 @@ Expected: all 30 images appear; no image has two or more missed ground-truth obj
 
 ```powershell
 runtime\python\oof_eval\Scripts\python.exe -m unittest discover -s test/tools/bread_training -v
-runtime\python\oof_eval\Scripts\python.exe -m unittest test.tools.test_bread_box_worker -v
+runtime\python\oof_eval\Scripts\python.exe -m unittest discover `
+  -s test/tools -p test_bread_box_worker.py -v
 flutter test
 cmake -S windows -B build\windows\x64
 ```
