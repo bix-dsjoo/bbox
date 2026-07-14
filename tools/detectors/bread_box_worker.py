@@ -153,14 +153,16 @@ class BreadInferenceEngine:
                 device="cpu",
                 verbose=False,
             )[0]
-        boxes = _pipeline_detection_boxes(
+        boxes, detector_errors = _pipeline_detection_boxes(
             detection, image_width=image_width, image_height=image_height
         )
         boxes = _nms(boxes, iou_threshold=0.85)
         boxes.sort(key=lambda item: (item["xyxy"][1], item["xyxy"][0]))
         if max_proposals is not None:
             boxes = boxes[: max(0, int(max_proposals))]
-        return self._classify_result(payload, image, boxes)
+        return self._classify_result(
+            payload, image, boxes, initial_stage_errors=detector_errors
+        )
 
     def classify_bytes(self, payload, boxes):
         image = self._decode(payload)
@@ -184,11 +186,12 @@ class BreadInferenceEngine:
             raise DecodeError("Image could not be decoded.")
         return image
 
-    def _classify_result(self, payload, image, boxes):
+    def _classify_result(self, payload, image, boxes, *, initial_stage_errors=()):
         image_height, image_width = image.shape[:2]
-        decisions, stage_errors = self._classify_crops(
+        decisions, classifier_errors = self._classify_crops(
             image, boxes, image_width=image_width, image_height=image_height
         )
+        stage_errors = [*initial_stage_errors, *classifier_errors]
         json_boxes = []
         for box, decision in zip(boxes, decisions):
             label = decision
@@ -419,17 +422,31 @@ def _json_box(box):
 
 def _pipeline_detection_boxes(result, *, image_width, image_height):
     if result.boxes is None:
-        return []
-    rows = result.boxes.xyxy.cpu().numpy()
-    confidences = result.boxes.conf.cpu().numpy()
+        return [], []
+    try:
+        rows = _tensor_list(result.boxes.xyxy)
+        confidences = _tensor_list(result.boxes.conf)
+    except (TypeError, ValueError, OverflowError, AttributeError) as error:
+        return [], [_stage_error("detector", f"invalid detector output: {error}")]
     boxes = []
+    malformed = len(rows) != len(confidences)
     for index, row in enumerate(rows):
+        if (
+            not isinstance(row, (list, tuple))
+            or len(row) != 4
+            or not all(_is_finite_builtin_number(value) for value in row)
+        ):
+            malformed = True
+            continue
+        if index >= len(confidences):
+            malformed = True
+            continue
+        raw_confidence = confidences[index]
+        if not _is_finite_builtin_number(raw_confidence):
+            malformed = True
+            continue
         values = tuple(float(value) for value in row)
-        if len(values) != 4 or not all(math.isfinite(value) for value in values):
-            continue
-        confidence = float(confidences[index])
-        if not math.isfinite(confidence):
-            continue
+        confidence = float(raw_confidence)
         clamped, changed = _clamp_xyxy(
             values, image_width=image_width, image_height=image_height
         )
@@ -443,7 +460,33 @@ def _pipeline_detection_boxes(result, *, image_width, image_height):
                 "edge_clipped": changed,
             }
         )
-    return boxes
+    errors = (
+        [_stage_error("detector", "malformed detector boxes were omitted")]
+        if malformed
+        else []
+    )
+    return boxes, errors
+
+
+def _tensor_list(value):
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    elif hasattr(value, "numpy"):
+        value = value.numpy().tolist()
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("detector tensor must contain a sequence")
+    return value
+
+
+def _is_finite_builtin_number(value):
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
 def _supplied_pipeline_box(item, *, image_width, image_height):
@@ -464,9 +507,13 @@ def _supplied_pipeline_box(item, *, image_width, image_height):
     return {
         "id": item.get("id"),
         "xyxy": clamped,
-        "confidence": item.get("confidence"),
+        "confidence": _optional_confidence(item.get("confidence")),
         "edge_clipped": changed,
     }
+
+
+def _optional_confidence(value):
+    return float(value) if _is_finite_builtin_number(value) else None
 
 
 def _finite_number(value):

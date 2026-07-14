@@ -113,6 +113,22 @@ class PipelineDetector:
         return [DetectionResult(self.rows)]
 
 
+class RawDetector:
+    def __init__(self, rows, confidences):
+        self.rows = rows
+        self.confidences = confidences
+
+    def predict(self, image, **kwargs):
+        return [
+            types.SimpleNamespace(
+                boxes=types.SimpleNamespace(
+                    xyxy=FakeTensor(self.rows),
+                    conf=FakeTensor(self.confidences),
+                )
+            )
+        ]
+
+
 class ClassifierResult:
     def __init__(self, scores):
         self.probs = types.SimpleNamespace(data=FakeTensor(scores))
@@ -545,6 +561,63 @@ class BreadInferenceEngineTest(unittest.TestCase):
 
         self.assertEqual(result["boxes"], [])
 
+    def test_malformed_detector_rows_are_discarded_without_losing_valid_rows(self):
+        engine = pipeline_engine(
+            RawDetector(
+                [
+                    (2, 3, 20, 22),
+                    (1, 2, 3),
+                    ("1", 2, 10, 12),
+                    (True, 2, 10, 12),
+                    (float("nan"), 2, 10, 12),
+                    (40, 5, 75, 45),
+                ],
+                [0.9, 0.8, 0.7, 0.6, 0.5, 0.95],
+            ),
+            BatchClassifier([(0.95, 0.03, 0.02), (0.95, 0.03, 0.02)]),
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual([item["x"] for item in result["boxes"]], [2, 40])
+
+    def test_extreme_detector_integer_is_discarded_without_aborting_valid_row(self):
+        engine = pipeline_engine(
+            RawDetector(
+                [(10**1000, 2, 10, 12), (2, 3, 20, 22)],
+                [0.8, 0.9],
+            ),
+            BatchClassifier([(0.95, 0.03, 0.02)]),
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(len(result["boxes"]), 1)
+        self.assertEqual(result["boxes"][0]["x"], 2)
+
+    def test_missing_detector_confidence_omits_unpaired_row_and_reports_error(self):
+        engine = pipeline_engine(
+            RawDetector([(2, 3, 20, 22), (40, 5, 75, 45)], [0.9]),
+            BatchClassifier([(0.95, 0.03, 0.02)]),
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(len(result["boxes"]), 1)
+        self.assertEqual(result["stageErrors"][0]["stage"], "detector")
+
+    def test_extra_and_invalid_detector_confidences_preserve_valid_pairs(self):
+        engine = pipeline_engine(
+            RawDetector([(2, 3, 20, 22), (40, 5, 75, 45)], [0.9, "0.8", True]),
+            BatchClassifier([(0.95, 0.03, 0.02)]),
+        )
+
+        result = engine.detect_bytes(pipeline_png_bytes())
+
+        self.assertEqual(len(result["boxes"]), 1)
+        self.assertEqual(result["boxes"][0]["confidence"], 0.9)
+        self.assertEqual(result["stageErrors"][0]["stage"], "detector")
+
     def test_request_bytes_are_hashed(self):
         payload = pipeline_png_bytes()
         engine = pipeline_engine(PipelineDetector([]), BatchClassifier([]))
@@ -566,6 +639,51 @@ class BreadInferenceEngineTest(unittest.TestCase):
         self.assertEqual(result["boxes"][0]["id"], "manual")
         self.assertEqual(result["boxes"][0]["width"], 10)
         self.assertIn("edge_clipped", result["boxes"][0]["label"]["reviewReasons"])
+
+    def test_invalid_manual_confidence_is_normalized_to_null_and_json_safe(self):
+        for confidence in (True, "0.9", float("nan"), float("inf"), 10**1000):
+            with self.subTest(confidence=confidence):
+                engine = pipeline_engine(
+                    PipelineDetector([]), BatchClassifier([(0.95, 0.03, 0.02)])
+                )
+
+                result = engine.classify_bytes(
+                    pipeline_png_bytes(),
+                    [
+                        {
+                            "id": "manual",
+                            "x": 2,
+                            "y": 3,
+                            "width": 10,
+                            "height": 11,
+                            "confidence": confidence,
+                        }
+                    ],
+                )
+
+                self.assertIsNone(result["boxes"][0]["confidence"])
+                json.dumps(result, allow_nan=False)
+
+    def test_valid_manual_confidence_is_preserved(self):
+        engine = pipeline_engine(
+            PipelineDetector([]), BatchClassifier([(0.95, 0.03, 0.02)])
+        )
+
+        result = engine.classify_bytes(
+            pipeline_png_bytes(),
+            [
+                {
+                    "id": "manual",
+                    "x": 2,
+                    "y": 3,
+                    "width": 10,
+                    "height": 11,
+                    "confidence": 0.75,
+                }
+            ],
+        )
+
+        self.assertEqual(result["boxes"][0]["confidence"], 0.75)
 
     def test_duplicate_reason_is_applied_to_survivors_after_nms(self):
         engine = pipeline_engine(
