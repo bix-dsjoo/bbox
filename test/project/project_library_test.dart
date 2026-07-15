@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -265,7 +266,116 @@ void main() {
         p.join(appDataRoot, 'BBoxLabeler', 'projects'),
       );
     });
+
+    test(
+      'serializes a barrier-delayed create with a concurrent import',
+      () async {
+        final createEntered = Completer<void>();
+        final releaseCreate = Completer<void>();
+        final enteredOperations = <String>[];
+        final serialized = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          beforeOperation: (operation) async {
+            enteredOperations.add(operation);
+            if (operation == ProjectLibraryOperation.create) {
+              createEntered.complete();
+              await releaseCreate.future;
+            }
+          },
+        );
+
+        final create = serialized.createProject('Created');
+        await createEntered.future;
+        final import = serialized.importProject(_externalProject(tempDir.path));
+        await Future<void>.delayed(Duration.zero);
+
+        expect(enteredOperations, [ProjectLibraryOperation.create]);
+        releaseCreate.complete();
+        final results = await Future.wait([create, import]);
+
+        expect(
+          results.map(
+            (project) => p.basename(p.dirname(project.projectFilePath!)),
+          ),
+          ['fixed-project', 'fixed-project-2'],
+        );
+        expect(
+          (await serialized.listProjects()).map((entry) => entry.id).toSet(),
+          {'fixed-project', 'fixed-project-2'},
+        );
+        expect(await _projectDirectoryNames(serialized), {
+          'fixed-project',
+          'fixed-project-2',
+        });
+        expect(await _indexProjectIds(serialized), {
+          'fixed-project',
+          'fixed-project-2',
+        });
+      },
+    );
+
+    test(
+      'serializes import then rename and delete with exact final state',
+      () async {
+        await library.createProject('Existing');
+        final importEntered = Completer<void>();
+        final releaseImport = Completer<void>();
+        final enteredOperations = <String>[];
+        final serialized = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          beforeOperation: (operation) async {
+            enteredOperations.add(operation);
+            if (operation == ProjectLibraryOperation.importProject) {
+              importEntered.complete();
+              await releaseImport.future;
+            }
+          },
+        );
+
+        final import = serialized.importProject(_externalProject(tempDir.path));
+        await importEntered.future;
+        final rename = serialized.renameProject('fixed-project', 'Renamed');
+        final delete = serialized.deleteProject('fixed-project');
+        await Future<void>.delayed(Duration.zero);
+
+        expect(enteredOperations, [ProjectLibraryOperation.importProject]);
+        releaseImport.complete();
+        final imported = await import;
+        await rename;
+        await delete;
+
+        final importedId = p.basename(p.dirname(imported.projectFilePath!));
+        expect(importedId, 'fixed-project-2');
+        expect((await serialized.listProjects()).map((entry) => entry.id), [
+          'fixed-project-2',
+        ]);
+        expect(await _projectDirectoryNames(serialized), {'fixed-project-2'});
+        expect(await _indexProjectIds(serialized), {'fixed-project-2'});
+      },
+    );
   });
+}
+
+Future<Set<String>> _projectDirectoryNames(ProjectLibrary library) async {
+  final root = Directory(library.projectsRootPath);
+  return {
+    await for (final entity in root.list(followLinks: false))
+      if (entity is Directory) p.basename(entity.path),
+  };
+}
+
+Future<Set<String>> _indexProjectIds(ProjectLibrary library) async {
+  final raw =
+      jsonDecode(await File(library.indexFilePath).readAsString())
+          as Map<String, Object?>;
+  return {
+    for (final entry in raw['projects']! as List<Object?>)
+      (entry as Map<String, Object?>)['id']! as String,
+  };
 }
 
 AnnotationProject _externalProject(String rootPath) {

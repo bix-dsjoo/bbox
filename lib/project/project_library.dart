@@ -9,6 +9,16 @@ import 'project_store.dart';
 
 typedef Clock = DateTime Function();
 typedef ProjectIdGenerator = String Function(String name, DateTime timestamp);
+typedef ProjectLibraryOperationHook = Future<void> Function(String operation);
+
+abstract final class ProjectLibraryOperation {
+  static const create = 'create';
+  static const importProject = 'import';
+  static const rename = 'rename';
+  static const delete = 'delete';
+  static const refreshIndex = 'refresh-index';
+  static const rebuildIndex = 'rebuild-index';
+}
 
 class UnsupportedProjectIndexVersionException implements Exception {
   UnsupportedProjectIndexVersionException(this.version);
@@ -72,8 +82,10 @@ class ProjectLibrary {
     required this.rootPath,
     Clock? clock,
     ProjectIdGenerator? idGenerator,
+    ProjectLibraryOperationHook? beforeOperation,
   }) : _clock = clock ?? DateTime.now,
-       _idGenerator = idGenerator ?? _defaultProjectId;
+       _idGenerator = idGenerator ?? _defaultProjectId,
+       _beforeOperation = beforeOperation;
 
   factory ProjectLibrary.appData({Map<String, String>? environment}) {
     final appData = environment?['APPDATA'] ?? Platform.environment['APPDATA'];
@@ -88,24 +100,34 @@ class ProjectLibrary {
   final String rootPath;
   final Clock _clock;
   final ProjectIdGenerator _idGenerator;
+  final ProjectLibraryOperationHook? _beforeOperation;
+  Future<void> _operationTail = Future<void>.value();
 
   String get projectsRootPath => p.join(rootPath, 'projects');
   String get indexFilePath => p.join(projectsRootPath, 'index.json');
 
-  Future<List<ProjectLibraryEntry>> listProjects() async {
+  Future<List<ProjectLibraryEntry>> listProjects() =>
+      _serialize(null, _listProjectsUnlocked);
+
+  Future<List<ProjectLibraryEntry>> _listProjectsUnlocked() async {
     try {
       final entries = await _readIndex();
       return _sorted(entries);
     } on FormatException {
-      return rebuildIndex();
+      return _rebuildIndexUnlocked();
     } on FileSystemException {
-      return rebuildIndex();
+      return _rebuildIndexUnlocked();
     } on TypeError {
-      return rebuildIndex();
+      return _rebuildIndexUnlocked();
     }
   }
 
-  Future<AnnotationProject> createProject(String name) async {
+  Future<AnnotationProject> createProject(String name) => _serialize(
+    ProjectLibraryOperation.create,
+    () => _createProjectUnlocked(name),
+  );
+
+  Future<AnnotationProject> _createProjectUnlocked(String name) async {
     final timestamp = _clock().toUtc();
     final id = await _uniqueProjectId(name, timestamp);
     final projectFilePath = p.join(projectsRootPath, id, 'project.bbox.json');
@@ -116,11 +138,23 @@ class ProjectLibrary {
           labels: createDefaultLabels(),
         );
     final saved = await ProjectStore.save(project, projectFilePath);
-    await refreshEntry(saved, createdAt: timestamp, updatedAt: timestamp);
+    await _refreshEntryUnlocked(
+      saved,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    );
     return saved;
   }
 
-  Future<AnnotationProject> importProject(AnnotationProject source) async {
+  Future<AnnotationProject> importProject(AnnotationProject source) =>
+      _serialize(
+        ProjectLibraryOperation.importProject,
+        () => _importProjectUnlocked(source),
+      );
+
+  Future<AnnotationProject> _importProjectUnlocked(
+    AnnotationProject source,
+  ) async {
     final timestamp = _clock().toUtc();
     final id = await _uniqueProjectId(source.name, timestamp);
     final targetPath = p.join(projectsRootPath, id, 'project.bbox.json');
@@ -130,7 +164,11 @@ class ProjectLibrary {
     );
     final saved = await ProjectStore.save(imported, targetPath);
     try {
-      await refreshEntry(saved, createdAt: timestamp, updatedAt: timestamp);
+      await _refreshEntryUnlocked(
+        saved,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      );
       return saved;
     } catch (_) {
       final directory = Directory(p.dirname(targetPath));
@@ -141,8 +179,11 @@ class ProjectLibrary {
     }
   }
 
-  Future<AnnotationProject> openProject(String id) async {
-    final entries = await listProjects();
+  Future<AnnotationProject> openProject(String id) =>
+      _serialize(null, () => _openProjectUnlocked(id));
+
+  Future<AnnotationProject> _openProjectUnlocked(String id) async {
+    final entries = await _listProjectsUnlocked();
     final entry = entries.firstWhere(
       (entry) => entry.id == id,
       orElse: () => throw StateError('Project not found: $id'),
@@ -150,16 +191,29 @@ class ProjectLibrary {
     return ProjectStore.load(entry.projectFilePath);
   }
 
-  Future<AnnotationProject> renameProject(String id, String name) async {
-    final project = await openProject(id);
+  Future<AnnotationProject> renameProject(String id, String name) => _serialize(
+    ProjectLibraryOperation.rename,
+    () => _renameProjectUnlocked(id, name),
+  );
+
+  Future<AnnotationProject> _renameProjectUnlocked(
+    String id,
+    String name,
+  ) async {
+    final project = await _openProjectUnlocked(id);
     final renamed = project.copyWith(name: _normalizeName(name));
     final saved = await ProjectStore.save(renamed, project.projectFilePath!);
-    await refreshEntry(saved);
+    await _refreshEntryUnlocked(saved);
     return saved;
   }
 
-  Future<void> deleteProject(String id) async {
-    final entries = await listProjects();
+  Future<void> deleteProject(String id) => _serialize(
+    ProjectLibraryOperation.delete,
+    () => _deleteProjectUnlocked(id),
+  );
+
+  Future<void> _deleteProjectUnlocked(String id) async {
+    final entries = await _listProjectsUnlocked();
     final entry = entries.firstWhere(
       (entry) => entry.id == id,
       orElse: () => throw StateError('Project not found: $id'),
@@ -182,13 +236,26 @@ class ProjectLibrary {
     AnnotationProject project, {
     DateTime? createdAt,
     DateTime? updatedAt,
+  }) => _serialize(
+    ProjectLibraryOperation.refreshIndex,
+    () => _refreshEntryUnlocked(
+      project,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+    ),
+  );
+
+  Future<void> _refreshEntryUnlocked(
+    AnnotationProject project, {
+    DateTime? createdAt,
+    DateTime? updatedAt,
   }) async {
     final projectFilePath = project.projectFilePath;
     if (projectFilePath == null) {
       throw StateError('Project file path is required.');
     }
     final id = p.basename(p.dirname(projectFilePath));
-    final entries = await listProjects();
+    final entries = await _listProjectsUnlocked();
     ProjectLibraryEntry? existing;
     for (final entry in entries) {
       if (entry.id == id) {
@@ -210,7 +277,10 @@ class ProjectLibrary {
     ]);
   }
 
-  Future<List<ProjectLibraryEntry>> rebuildIndex() async {
+  Future<List<ProjectLibraryEntry>> rebuildIndex() =>
+      _serialize(ProjectLibraryOperation.rebuildIndex, _rebuildIndexUnlocked);
+
+  Future<List<ProjectLibraryEntry>> _rebuildIndexUnlocked() async {
     final root = Directory(projectsRootPath);
     if (!await root.exists()) {
       await _writeIndex(const []);
@@ -277,14 +347,46 @@ class ProjectLibrary {
     final file = File(indexFilePath);
     await file.parent.create(recursive: true);
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(
-      encoder.convert({
-        'schemaVersion': currentIndexSchemaVersion,
-        'projects': _sorted(entries).map((entry) => entry.toJson()).toList(),
-      }),
-      encoding: utf8,
-      flush: true,
+    final temp = File(
+      '$indexFilePath.tmp-${DateTime.now().microsecondsSinceEpoch}',
     );
+    final backup = File(
+      '$indexFilePath.bak-${DateTime.now().microsecondsSinceEpoch}',
+    );
+    var movedExisting = false;
+    try {
+      await temp.writeAsString(
+        encoder.convert({
+          'schemaVersion': currentIndexSchemaVersion,
+          'projects': _sorted(entries).map((entry) => entry.toJson()).toList(),
+        }),
+        encoding: utf8,
+        flush: true,
+      );
+      if (await file.exists()) {
+        await file.rename(backup.path);
+        movedExisting = true;
+      }
+      await temp.rename(file.path);
+      if (await backup.exists()) await backup.delete();
+    } catch (_) {
+      if (movedExisting && !await file.exists() && await backup.exists()) {
+        await backup.rename(file.path);
+      }
+      rethrow;
+    } finally {
+      if (await temp.exists()) await temp.delete();
+      if (await backup.exists() && await file.exists()) await backup.delete();
+    }
+  }
+
+  Future<T> _serialize<T>(String? operation, Future<T> Function() action) {
+    final result = _operationTail.then((_) async {
+      if (operation != null) await _beforeOperation?.call(operation);
+      return action();
+    });
+    _operationTail = result.then<void>((_) {}, onError: (_, _) {});
+    return result;
   }
 
   static List<ProjectLibraryEntry> _sorted(List<ProjectLibraryEntry> entries) {
