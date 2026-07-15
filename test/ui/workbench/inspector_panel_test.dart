@@ -405,7 +405,9 @@ void main() {
       expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget);
     });
 
-    testWidgets('box table rows follow display number order', (tester) async {
+    testWidgets('box table rows follow fixed-anchor display order', (
+      tester,
+    ) async {
       final controller = AppController();
       controller.loadProject(
         project().copyWith(
@@ -413,19 +415,27 @@ void main() {
             project().images.first.copyWith(
               boxes: const [
                 BoundingBox(
-                  id: 'box-bottom-left',
-                  x: 10,
-                  y: 60,
-                  width: 10,
-                  height: 10,
+                  id: 'box-a',
+                  x: 60,
+                  y: 0,
+                  width: 20,
+                  height: 20,
                   status: BoxStatus.proposal,
                 ),
                 BoundingBox(
-                  id: 'box-top-right',
-                  x: 80,
-                  y: 10,
-                  width: 10,
-                  height: 10,
+                  id: 'box-b',
+                  x: 40,
+                  y: 9,
+                  width: 20,
+                  height: 20,
+                  status: BoxStatus.proposal,
+                ),
+                BoundingBox(
+                  id: 'box-c',
+                  x: 20,
+                  y: 18,
+                  width: 20,
+                  height: 20,
                   status: BoxStatus.proposal,
                 ),
               ],
@@ -451,8 +461,9 @@ void main() {
       );
 
       expect(table.rows.map((row) => row.key), [
-        const ValueKey('box-table-row-box-top-right'),
-        const ValueKey('box-table-row-box-bottom-left'),
+        const ValueKey('box-table-row-box-b'),
+        const ValueKey('box-table-row-box-a'),
+        const ValueKey('box-table-row-box-c'),
       ]);
     });
 

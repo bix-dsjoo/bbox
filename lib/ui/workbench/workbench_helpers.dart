@@ -50,39 +50,7 @@ Size _overlayBadgeSize(String label, TextDirection textDirection) {
 }
 
 Map<String, int> _boxDisplayNumbers(AnnotatedImage image) {
-  final visibleBoxes = image.visibleBoxes.toList(growable: false);
-  final originalOrder = <String, int>{};
-  for (var index = 0; index < visibleBoxes.length; index++) {
-    originalOrder[visibleBoxes[index].id] = index;
-  }
-  final sortedBoxes = visibleBoxes.toList(growable: false)
-    ..sort((a, b) {
-      if (!_sameVisualRow(a, b)) {
-        return a.y.compareTo(b.y);
-      }
-      final leftComparison = a.x.compareTo(b.x);
-      if (leftComparison != 0) {
-        return leftComparison;
-      }
-      final topComparison = a.y.compareTo(b.y);
-      if (topComparison != 0) {
-        return topComparison;
-      }
-      return (originalOrder[a.id] ?? 0).compareTo(originalOrder[b.id] ?? 0);
-    });
-
-  final numbers = <String, int>{};
-  var index = 1;
-  for (final box in sortedBoxes) {
-    numbers[box.id] = index;
-    index += 1;
-  }
-  return numbers;
-}
-
-bool _sameVisualRow(BoundingBox a, BoundingBox b) {
-  final rowTolerance = math.max(4.0, math.min(a.height, b.height) * 0.5);
-  return (a.y - b.y).abs() <= rowTolerance;
+  return BoxDisplayOrder.numbers(image);
 }
 
 int _boxDisplayNumber(Map<String, int> boxDisplayNumbers, BoundingBox box) {
@@ -123,7 +91,7 @@ _SidebarBoxGroups _sidebarBoxGroups(AnnotatedImage image) {
   final unlabeled = <BoundingBox>[];
   final labeled = <BoundingBox>[];
   final invalid = <BoundingBox>[];
-  for (final box in image.visibleBoxes) {
+  for (final box in BoxDisplayOrder.sorted(image)) {
     if (_boxIsInvalid(image, box)) {
       invalid.add(box);
     } else if (_boxNeedsLabel(box)) {

@@ -627,7 +627,7 @@ void main() {
       expect(controller.selectedImageId, 1);
     });
 
-    test('assignSelectedBoxLabel selects the next box needing a label', () {
+    test('assignSelectedBoxLabel follows display numbers from #1 to #2', () {
       final controller = AppController()
         ..loadProject(
           AnnotationProject.empty(name: 'demo').copyWith(
@@ -644,6 +644,14 @@ void main() {
                 height: 80,
                 status: ImageStatus.needsReview,
                 boxes: [
+                  BoundingBox(
+                    id: 'box-3',
+                    x: 10,
+                    y: 50,
+                    width: 20,
+                    height: 20,
+                    status: BoxStatus.proposal,
+                  ),
                   BoundingBox(
                     id: 'box-1',
                     x: 10,
@@ -669,9 +677,70 @@ void main() {
       controller.selectBox('box-1');
       controller.assignSelectedBoxLabel(1);
 
-      expect(controller.selectedImage!.boxes.first.status, BoxStatus.labeled);
+      expect(
+        controller.selectedImage!.boxes
+            .singleWhere((box) => box.id == 'box-1')
+            .status,
+        BoxStatus.labeled,
+      );
       expect(controller.selectedBoxId, 'box-2');
     });
+
+    test(
+      'assignSelectedBoxLabel ignores source order when selecting visual #2',
+      () {
+        final controller = AppController()
+          ..loadProject(
+            AnnotationProject.empty(name: 'demo').copyWith(
+              status: ProjectStatus.ready,
+              labels: const [
+                LabelClass(id: 1, name: 'Person', color: 0xffe64a19),
+              ],
+              images: const [
+                AnnotatedImage(
+                  id: 1,
+                  sourcePath: 'a.jpg',
+                  displayName: 'a.jpg',
+                  width: 100,
+                  height: 80,
+                  status: ImageStatus.needsReview,
+                  boxes: [
+                    BoundingBox(
+                      id: 'box-3',
+                      x: 10,
+                      y: 50,
+                      width: 20,
+                      height: 20,
+                      status: BoxStatus.proposal,
+                    ),
+                    BoundingBox(
+                      id: 'box-2',
+                      x: 40,
+                      y: 10,
+                      width: 20,
+                      height: 20,
+                      status: BoxStatus.proposal,
+                    ),
+                    BoundingBox(
+                      id: 'box-1',
+                      x: 10,
+                      y: 10,
+                      width: 20,
+                      height: 20,
+                      status: BoxStatus.proposal,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          );
+
+        controller.selectBox('box-1');
+        controller.assignSelectedBoxLabel(1);
+
+        expect(controller.selectedBoxId, 'box-2');
+      },
+    );
 
     test(
       'assignSelectedBoxLabel keeps selection when all boxes are labeled',

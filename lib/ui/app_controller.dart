@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../annotation/annotation_rules.dart';
+import '../annotation/box_display_order.dart';
 import '../annotation/default_labels.dart';
 import '../annotation/label_shortcut_migration.dart';
 import '../annotation/models.dart';
@@ -652,7 +653,7 @@ class AppController extends ChangeNotifier {
   }
 
   String? nextBoxNeedingLabelId(AnnotatedImage image, {String? afterBoxId}) {
-    final boxes = image.visibleBoxes.toList(growable: false);
+    final boxes = BoxDisplayOrder.sorted(image);
     if (boxes.isEmpty) {
       return null;
     }

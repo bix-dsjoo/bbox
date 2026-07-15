@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../annotation/annotation_rules.dart';
+import '../../annotation/box_display_order.dart';
 import '../../annotation/models.dart';
 import '../../detector/auto_box_service.dart';
 import '../../viewer/viewport_transform.dart';
