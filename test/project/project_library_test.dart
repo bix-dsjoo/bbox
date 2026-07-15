@@ -357,6 +357,144 @@ void main() {
         expect(await _indexProjectIds(serialized), {'fixed-project-2'});
       },
     );
+
+    test('create rolls back its directory when index write fails', () async {
+      var failIndexWrite = true;
+      final rollbackLibrary = ProjectLibrary(
+        rootPath: tempDir.path,
+        clock: () => now,
+        idGenerator: (name, timestamp) => 'rollback-create',
+        beforeIndexWrite: () async {
+          if (failIndexWrite) {
+            throw FileSystemException('injected index failure');
+          }
+        },
+      );
+
+      await expectLater(
+        rollbackLibrary.createProject('Failed Create'),
+        throwsA(isA<FileSystemException>()),
+      );
+
+      expect(await _projectDirectoryNames(rollbackLibrary), isEmpty);
+      expect(await File(rollbackLibrary.indexFilePath).exists(), isFalse);
+
+      failIndexWrite = false;
+      final recovered = await rollbackLibrary.createProject('Recovered Create');
+      expect(
+        p.basename(p.dirname(recovered.projectFilePath!)),
+        'rollback-create',
+      );
+      expect(await _indexProjectIds(rollbackLibrary), {'rollback-create'});
+    });
+
+    test('import rolls back its directory when index write fails', () async {
+      var failIndexWrite = true;
+      final rollbackLibrary = ProjectLibrary(
+        rootPath: tempDir.path,
+        clock: () => now,
+        idGenerator: (name, timestamp) => 'rollback-import',
+        beforeIndexWrite: () async {
+          if (failIndexWrite) {
+            throw FileSystemException('injected index failure');
+          }
+        },
+      );
+
+      await expectLater(
+        rollbackLibrary.importProject(_externalProject(tempDir.path)),
+        throwsA(isA<FileSystemException>()),
+      );
+
+      expect(await _projectDirectoryNames(rollbackLibrary), isEmpty);
+      expect(await File(rollbackLibrary.indexFilePath).exists(), isFalse);
+
+      failIndexWrite = false;
+      final recovered = await rollbackLibrary.importProject(
+        _externalProject(tempDir.path),
+      );
+      expect(
+        p.basename(p.dirname(recovered.projectFilePath!)),
+        'rollback-import',
+      );
+      expect(await _indexProjectIds(rollbackLibrary), {'rollback-import'});
+    });
+
+    test(
+      'rename restores the original project JSON when index write fails',
+      () async {
+        final created = await library.createProject('Original Name');
+        final projectFile = File(created.projectFilePath!);
+        final originalJson = await projectFile.readAsString();
+        var failIndexWrite = true;
+        final rollbackLibrary = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          beforeIndexWrite: () async {
+            if (failIndexWrite) {
+              throw FileSystemException('injected index failure');
+            }
+          },
+        );
+
+        await expectLater(
+          rollbackLibrary.renameProject('fixed-project', 'Must Roll Back'),
+          throwsA(isA<FileSystemException>()),
+        );
+
+        expect(await projectFile.readAsString(), originalJson);
+        expect(
+          (await rollbackLibrary.openProject('fixed-project')).name,
+          'Original Name',
+        );
+        expect(
+          (await rollbackLibrary.listProjects()).single.name,
+          'Original Name',
+        );
+
+        failIndexWrite = false;
+        final recovered = await rollbackLibrary.renameProject(
+          'fixed-project',
+          'Recovered Rename',
+        );
+        expect(recovered.name, 'Recovered Rename');
+      },
+    );
+
+    test('delete restores its directory when index write fails', () async {
+      final created = await library.createProject('Delete Rollback');
+      final projectDirectory = Directory(p.dirname(created.projectFilePath!));
+      var failIndexWrite = true;
+      final rollbackLibrary = ProjectLibrary(
+        rootPath: tempDir.path,
+        clock: () => now,
+        idGenerator: (name, timestamp) => 'fixed-project',
+        beforeIndexWrite: () async {
+          if (failIndexWrite) {
+            throw FileSystemException('injected index failure');
+          }
+        },
+      );
+
+      await expectLater(
+        rollbackLibrary.deleteProject('fixed-project'),
+        throwsA(isA<FileSystemException>()),
+      );
+
+      expect(await projectDirectory.exists(), isTrue);
+      expect(
+        (await rollbackLibrary.openProject('fixed-project')).name,
+        'Delete Rollback',
+      );
+      expect(await _tombstoneNames(rollbackLibrary), isEmpty);
+
+      failIndexWrite = false;
+      await rollbackLibrary.deleteProject('fixed-project');
+      expect(await projectDirectory.exists(), isFalse);
+      expect(await rollbackLibrary.listProjects(), isEmpty);
+      expect(await _tombstoneNames(rollbackLibrary), isEmpty);
+    });
   });
 }
 
@@ -375,6 +513,16 @@ Future<Set<String>> _indexProjectIds(ProjectLibrary library) async {
   return {
     for (final entry in raw['projects']! as List<Object?>)
       (entry as Map<String, Object?>)['id']! as String,
+  };
+}
+
+Future<Set<String>> _tombstoneNames(ProjectLibrary library) async {
+  final root = Directory(library.projectsRootPath);
+  if (!await root.exists()) return const {};
+  return {
+    await for (final entity in root.list(followLinks: false))
+      if (p.basename(entity.path).contains('.deleting-'))
+        p.basename(entity.path),
   };
 }
 

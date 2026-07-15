@@ -10,6 +10,7 @@ import 'project_store.dart';
 typedef Clock = DateTime Function();
 typedef ProjectIdGenerator = String Function(String name, DateTime timestamp);
 typedef ProjectLibraryOperationHook = Future<void> Function(String operation);
+typedef ProjectIndexWriteHook = Future<void> Function();
 
 abstract final class ProjectLibraryOperation {
   static const create = 'create';
@@ -83,6 +84,7 @@ class ProjectLibrary {
     Clock? clock,
     ProjectIdGenerator? idGenerator,
     this.beforeOperation,
+    this.beforeIndexWrite,
   }) : _clock = clock ?? DateTime.now,
        _idGenerator = idGenerator ?? _defaultProjectId;
 
@@ -100,6 +102,7 @@ class ProjectLibrary {
   final Clock _clock;
   final ProjectIdGenerator _idGenerator;
   final ProjectLibraryOperationHook? beforeOperation;
+  final ProjectIndexWriteHook? beforeIndexWrite;
   Future<void> _operationTail = Future<void>.value();
 
   String get projectsRootPath => p.join(rootPath, 'projects');
@@ -130,19 +133,25 @@ class ProjectLibrary {
     final timestamp = _clock().toUtc();
     final id = await _uniqueProjectId(name, timestamp);
     final projectFilePath = p.join(projectsRootPath, id, 'project.bbox.json');
-    final project = AnnotationProject.empty(name: _normalizeName(name))
-        .copyWith(
-          projectFilePath: projectFilePath,
-          status: ProjectStatus.ready,
-          labels: createDefaultLabels(),
-        );
-    final saved = await ProjectStore.save(project, projectFilePath);
-    await _refreshEntryUnlocked(
-      saved,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    );
-    return saved;
+    final projectDirectory = _checkedProjectDirectory(projectFilePath);
+    try {
+      final project = AnnotationProject.empty(name: _normalizeName(name))
+          .copyWith(
+            projectFilePath: projectFilePath,
+            status: ProjectStatus.ready,
+            labels: createDefaultLabels(),
+          );
+      final saved = await ProjectStore.save(project, projectFilePath);
+      await _refreshEntryUnlocked(
+        saved,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      );
+      return saved;
+    } catch (_) {
+      await _deleteProjectDirectoryIfPresent(projectDirectory);
+      rethrow;
+    }
   }
 
   Future<AnnotationProject> importProject(AnnotationProject source) =>
@@ -157,12 +166,13 @@ class ProjectLibrary {
     final timestamp = _clock().toUtc();
     final id = await _uniqueProjectId(source.name, timestamp);
     final targetPath = p.join(projectsRootPath, id, 'project.bbox.json');
+    final projectDirectory = _checkedProjectDirectory(targetPath);
     final imported = source.copyWith(
       projectFilePath: targetPath,
       status: ProjectStatus.ready,
     );
-    final saved = await ProjectStore.save(imported, targetPath);
     try {
+      final saved = await ProjectStore.save(imported, targetPath);
       await _refreshEntryUnlocked(
         saved,
         createdAt: timestamp,
@@ -170,10 +180,7 @@ class ProjectLibrary {
       );
       return saved;
     } catch (_) {
-      final directory = Directory(p.dirname(targetPath));
-      if (await directory.exists()) {
-        await directory.delete(recursive: true);
-      }
+      await _deleteProjectDirectoryIfPresent(projectDirectory);
       rethrow;
     }
   }
@@ -200,10 +207,19 @@ class ProjectLibrary {
     String name,
   ) async {
     final project = await _openProjectUnlocked(id);
+    final projectFilePath = project.projectFilePath!;
+    _checkedProjectDirectory(projectFilePath);
+    final projectFile = File(projectFilePath);
+    final originalBytes = await projectFile.readAsBytes();
     final renamed = project.copyWith(name: _normalizeName(name));
-    final saved = await ProjectStore.save(renamed, project.projectFilePath!);
-    await _refreshEntryUnlocked(saved);
-    return saved;
+    try {
+      final saved = await ProjectStore.save(renamed, projectFilePath);
+      await _refreshEntryUnlocked(saved);
+      return saved;
+    } catch (_) {
+      await projectFile.writeAsBytes(originalBytes, flush: true);
+      rethrow;
+    }
   }
 
   Future<void> deleteProject(String id) => _serialize(
@@ -217,18 +233,25 @@ class ProjectLibrary {
       (entry) => entry.id == id,
       orElse: () => throw StateError('Project not found: $id'),
     );
-    final projectDir = Directory(p.dirname(entry.projectFilePath));
-    final normalizedRoot = p.normalize(
-      Directory(projectsRootPath).absolute.path,
-    );
-    final normalizedDir = p.normalize(projectDir.absolute.path);
-    if (!p.isWithin(normalizedRoot, normalizedDir)) {
-      throw StateError('Refusing to delete outside the project library.');
-    }
+    final projectDir = _checkedProjectDirectory(entry.projectFilePath);
+    Directory? tombstone;
     if (await projectDir.exists()) {
-      await projectDir.delete(recursive: true);
+      tombstone = await _nextTombstone(projectDir);
+      await projectDir.rename(tombstone.path);
     }
-    await _writeIndex(entries.where((entry) => entry.id != id).toList());
+    try {
+      await _writeIndex(entries.where((entry) => entry.id != id).toList());
+    } catch (_) {
+      if (tombstone != null &&
+          await tombstone.exists() &&
+          !await projectDir.exists()) {
+        await tombstone.rename(projectDir.path);
+      }
+      rethrow;
+    }
+    if (tombstone != null && await tombstone.exists()) {
+      await tombstone.delete(recursive: true);
+    }
   }
 
   Future<void> refreshEntry(
@@ -343,6 +366,7 @@ class ProjectLibrary {
   }
 
   Future<void> _writeIndex(List<ProjectLibraryEntry> entries) async {
+    await beforeIndexWrite?.call();
     final file = File(indexFilePath);
     await file.parent.create(recursive: true);
     const encoder = JsonEncoder.withIndent('  ');
@@ -386,6 +410,34 @@ class ProjectLibrary {
     });
     _operationTail = result.then<void>((_) {}, onError: (_, _) {});
     return result;
+  }
+
+  Directory _checkedProjectDirectory(String projectFilePath) {
+    final root = p.normalize(Directory(projectsRootPath).absolute.path);
+    final directory = Directory(p.dirname(projectFilePath)).absolute;
+    final normalizedDirectory = p.normalize(directory.path);
+    if (!p.isWithin(root, normalizedDirectory)) {
+      throw StateError('Refusing to mutate outside the project library.');
+    }
+    return Directory(normalizedDirectory);
+  }
+
+  Future<void> _deleteProjectDirectoryIfPresent(Directory directory) async {
+    _checkedProjectDirectory(p.join(directory.path, 'project.bbox.json'));
+    if (await directory.exists()) await directory.delete(recursive: true);
+  }
+
+  Future<Directory> _nextTombstone(Directory projectDirectory) async {
+    final baseName = p.basename(projectDirectory.path);
+    var suffix = DateTime.now().microsecondsSinceEpoch;
+    while (true) {
+      final candidate = Directory(
+        p.join(projectsRootPath, '$baseName.deleting-$suffix'),
+      ).absolute;
+      _checkedProjectDirectory(p.join(candidate.path, 'project.bbox.json'));
+      if (!await candidate.exists()) return candidate;
+      suffix += 1;
+    }
   }
 
   static List<ProjectLibraryEntry> _sorted(List<ProjectLibraryEntry> entries) {
