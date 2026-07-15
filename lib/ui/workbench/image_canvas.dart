@@ -608,7 +608,7 @@ class _BoxOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label = _labelFor(project, box.labelId);
+    final label = _labelFor(project, box.displayLabelId);
     final boxScreenWidth = screenRect.width;
     final boxScreenHeight = screenRect.height;
     final displayLabel = label?.name ?? WorkbenchCopy.unlabeledBox;
@@ -625,17 +625,33 @@ class _BoxOverlay extends StatelessWidget {
             boxScreenWidth: boxScreenWidth,
             textDirection: Directionality.of(context),
           );
+    final semanticDisplayLabel = box.requiresLabelReview
+        ? '$displayLabel, ${WorkbenchCopy.reviewRequired}'
+        : box.isAutoLabeled
+        ? '$displayLabel, ${WorkbenchCopy.automaticLabel}'
+        : displayLabel;
     final semanticLabel = WorkbenchCopy.boxSemanticLabel(
       number: displayNumber,
-      label: displayLabel,
+      label: semanticDisplayLabel,
       selected: selected,
     );
-    final color = box.status == BoxStatus.proposal
-        ? _automaticBoxColor
-        : Color(label?.color ?? 0xffd32f2f);
-    final fillAlpha = box.status == BoxStatus.proposal
+    final color = box.requiresLabelReview
+        ? WorkbenchPalette.danger
+        : box.status == BoxStatus.labeled && box.labelId != null
+        ? Colors.white
+        : _automaticBoxColor;
+    final labelColor = label == null ? null : Color(label.color);
+    final badgeBackgroundColor = labelColor ?? Colors.white.withAlpha(220);
+    final badgeTextColor = labelColor == null
+        ? color
+        : ThemeData.estimateBrightnessForColor(labelColor) == Brightness.dark
+        ? Colors.white
+        : Colors.black;
+    final fillAlpha = box.requiresLabelReview
+        ? (selected ? 50 : 34)
+        : box.status == BoxStatus.proposal
         ? (selected ? _automaticBoxSelectedFillAlpha : _automaticBoxFillAlpha)
-        : (selected ? _selectedBoxAlphaLabeled : 32);
+        : (selected ? 28 : 14);
     final handleHitSize = _resizeHandleHitSize;
     final overlayMargin = selected ? handleHitSize / 2 : 0.0;
 
@@ -671,6 +687,16 @@ class _BoxOverlay extends StatelessWidget {
                     border: Border.all(color: color, width: selected ? 3 : 2),
                     color: color.withAlpha(fillAlpha),
                     borderRadius: BorderRadius.circular(4),
+                    boxShadow:
+                        box.status == BoxStatus.labeled && box.labelId != null
+                        ? const [
+                            BoxShadow(
+                              color: Color(0xcc000000),
+                              blurRadius: 0,
+                              spreadRadius: 1,
+                            ),
+                          ]
+                        : null,
                   ),
                 ),
               ),
@@ -688,8 +714,8 @@ class _BoxOverlay extends StatelessWidget {
                 ),
                 painter: _OverlayBadgePainter(
                   label: overlayLabel,
-                  textColor: color,
-                  backgroundColor: Colors.white.withAlpha(220),
+                  textColor: badgeTextColor,
+                  backgroundColor: badgeBackgroundColor,
                   textDirection: Directionality.of(context),
                 ),
               ),

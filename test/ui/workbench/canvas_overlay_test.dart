@@ -465,7 +465,7 @@ void main() {
     });
 
     testWidgets(
-      'labeled box still uses label color instead of automatic gray',
+      'labeled box uses white outline and category-colored name badge',
       (tester) async {
         final controller = AppController()
           ..loadProject(
@@ -495,12 +495,51 @@ void main() {
           find.byKey(const ValueKey('box-box-1')),
         );
         final decoration = box.decoration! as BoxDecoration;
-        expect(decoration.border!.top.color, const Color(0xffe64a19));
-        expect(decoration.color, const Color(0xffe64a19).withAlpha(32));
-        expect(decoration.color, isNot(const Color(0xff5f6772).withAlpha(46)));
-        expect(decoration.color, isNot(const Color(0xff5f6772).withAlpha(58)));
+        expect(decoration.border!.top.color, Colors.white);
+        final badge = tester.widget<CustomPaint>(
+          find.byKey(const ValueKey('overlay-label-box-1')),
+        );
+        final dynamic painter = badge.painter;
+        expect(painter.backgroundColor, const Color(0xffe64a19));
       },
     );
+
+    testWidgets('review suggestion uses red outline and label-color badge', (
+      tester,
+    ) async {
+      final reviewBox = project().images.first.boxes.single.copyWith(
+        automation: const BoxAutomationMetadata(
+          suggestedLabelId: 1,
+          candidates: [LabelCandidate(labelId: 1, score: 0.58)],
+          reviewReasons: ['low_margin'],
+          pipelineVersion: 'test-v1',
+          policyVersion: 'test-policy-v1',
+          detectorSha256: 'detector-hash',
+        ),
+      );
+      final controller = AppController()
+        ..loadProject(
+          project().copyWith(
+            images: [
+              project().images.first.copyWith(boxes: [reviewBox]),
+              project().images.last,
+            ],
+          ),
+        );
+
+      await tester.pumpWidget(app(controller));
+
+      final box = tester.widget<Container>(
+        find.byKey(const ValueKey('box-box-1')),
+      );
+      final decoration = box.decoration! as BoxDecoration;
+      expect(decoration.border!.top.color, WorkbenchPalette.danger);
+      final badge = tester.widget<CustomPaint>(
+        find.byKey(const ValueKey('overlay-label-box-1')),
+      );
+      final dynamic painter = badge.painter;
+      expect(painter.backgroundColor, const Color(0xffe64a19));
+    });
 
     testWidgets('shows loading state while selected image is loading', (
       tester,

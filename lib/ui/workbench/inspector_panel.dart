@@ -393,7 +393,7 @@ class _BoxTableRow {
   final double coordinateColumnWidth;
 
   DataRow build(BuildContext context) {
-    final label = _labelFor(project, box.labelId);
+    final label = _labelFor(project, box.displayLabelId);
     final invalid = _boxIsInvalid(image, box);
     final selected = controller.selectedBoxId == box.id;
     final colorScheme = Theme.of(context).colorScheme;
@@ -423,11 +423,13 @@ class _BoxTableRow {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (invalid) ...[
+                if (invalid || box.requiresLabelReview) ...[
                   Icon(
                     Icons.warning_amber_rounded,
                     size: 14,
-                    color: colorScheme.error,
+                    color: box.requiresLabelReview
+                        ? WorkbenchPalette.danger
+                        : colorScheme.error,
                   ),
                   const SizedBox(width: 4),
                 ],
@@ -681,18 +683,26 @@ class _BoxRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label = _labelFor(project, box.labelId);
+    final label = _labelFor(project, box.displayLabelId);
     final selected = controller.selectedBoxId == box.id;
-    final color = switch (rowState) {
-      _SidebarBoxRowState.unlabeled => Theme.of(context).colorScheme.outline,
-      _SidebarBoxRowState.labeled => Color(label?.color ?? 0xffd32f2f),
-      _SidebarBoxRowState.invalid => Theme.of(context).colorScheme.error,
-    };
-    final title = switch (rowState) {
-      _SidebarBoxRowState.unlabeled => WorkbenchCopy.unlabeledBox,
-      _SidebarBoxRowState.labeled => label?.name ?? WorkbenchCopy.unlabeledBox,
-      _SidebarBoxRowState.invalid => WorkbenchCopy.error,
-    };
+    final color = box.requiresLabelReview
+        ? WorkbenchPalette.danger
+        : switch (rowState) {
+            _SidebarBoxRowState.unlabeled => Theme.of(
+              context,
+            ).colorScheme.outline,
+            _SidebarBoxRowState.labeled => Color(label?.color ?? 0xffd32f2f),
+            _SidebarBoxRowState.invalid => Theme.of(context).colorScheme.error,
+          };
+    final title = box.requiresLabelReview
+        ? '${label?.name ?? WorkbenchCopy.unlabeledBox} · '
+              '${WorkbenchCopy.reviewRequired}'
+        : switch (rowState) {
+            _SidebarBoxRowState.unlabeled => WorkbenchCopy.unlabeledBox,
+            _SidebarBoxRowState.labeled =>
+              label?.name ?? WorkbenchCopy.unlabeledBox,
+            _SidebarBoxRowState.invalid => WorkbenchCopy.error,
+          };
     final displayTitle = WorkbenchCopy.boxDisplayTitle(displayNumber, title);
 
     return Padding(
@@ -753,8 +763,8 @@ class _SelectedBoxDetails extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label =
-        _labelFor(project, box.labelId)?.name ?? WorkbenchCopy.unlabeledBox;
+    final displayLabel = _labelFor(project, box.displayLabelId);
+    final label = displayLabel?.name ?? WorkbenchCopy.unlabeledBox;
     return DecoratedBox(
       key: const ValueKey('selected-box-details'),
       decoration: BoxDecoration(
@@ -764,32 +774,186 @@ class _SelectedBoxDetails extends StatelessWidget {
         borderRadius: BorderRadius.circular(AppRadii.row),
         border: Border.all(color: Theme.of(context).dividerColor),
       ),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: box.requiresLabelReview ? 126 : double.infinity,
+        ),
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        WorkbenchCopy.selectedBoxDisplayTitle(
+                          displayNumber,
+                          label,
+                        ),
+                        key: const ValueKey('selected-box-display-title'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    _BoxAutomationStatus(box: box),
+                  ],
+                ),
+                if (box.requiresLabelReview) ...[
+                  const SizedBox(height: 8),
+                  _ReviewEvidence(project: project, metadata: box.automation!),
+                ],
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 6,
+                  children: [
+                    Text('x ${box.x.toStringAsFixed(0)}'),
+                    Text('y ${box.y.toStringAsFixed(0)}'),
+                    Text('w ${box.width.toStringAsFixed(0)}'),
+                    Text('h ${box.height.toStringAsFixed(0)}'),
+                    Text('area ${box.area.toStringAsFixed(0)}'),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BoxAutomationStatus extends StatelessWidget {
+  const _BoxAutomationStatus({required this.box});
+
+  final BoundingBox box;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, label, color) = box.requiresLabelReview
+        ? (
+            Icons.warning_amber_rounded,
+            WorkbenchCopy.reviewRequired,
+            WorkbenchPalette.danger,
+          )
+        : box.isAutoLabeled
+        ? (
+            Icons.auto_awesome_outlined,
+            WorkbenchCopy.automaticLabel,
+            WorkbenchPalette.mutedForeground,
+          )
+        : box.status == BoxStatus.labeled && box.labelId != null
+        ? (
+            Icons.label_outline,
+            WorkbenchCopy.assignedLabel,
+            WorkbenchPalette.mutedForeground,
+          )
+        : (
+            Icons.help_outline,
+            WorkbenchCopy.unclassified,
+            WorkbenchPalette.mutedForeground,
+          );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(width: 5),
+        Text(
+          label,
+          style: Theme.of(context).textTheme.labelMedium?.copyWith(
+            color: color,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ReviewEvidence extends StatelessWidget {
+  const _ReviewEvidence({required this.project, required this.metadata});
+
+  final AnnotationProject project;
+  final BoxAutomationMetadata metadata;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: WorkbenchPalette.dangerSoft.withAlpha(110),
+        borderRadius: BorderRadius.circular(AppRadii.badge),
+        border: Border.all(color: WorkbenchPalette.danger.withAlpha(70)),
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              WorkbenchCopy.selectedBoxDisplayTitle(displayNumber, label),
-              key: const ValueKey('selected-box-display-title'),
-              style: Theme.of(
-                context,
-              ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 10,
-              runSpacing: 6,
-              children: [
-                Text('x ${box.x.toStringAsFixed(0)}'),
-                Text('y ${box.y.toStringAsFixed(0)}'),
-                Text('w ${box.width.toStringAsFixed(0)}'),
-                Text('h ${box.height.toStringAsFixed(0)}'),
-                Text('area ${box.area.toStringAsFixed(0)}'),
-              ],
-            ),
+            for (final reason in metadata.reviewReasons)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 3),
+                child: Text(
+                  WorkbenchCopy.reviewReasonLabel(reason),
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            if (metadata.candidates.isNotEmpty) ...[
+              const SizedBox(height: 3),
+              for (final candidate in metadata.candidates.take(3))
+                _CandidateScoreRow(project: project, candidate: candidate),
+            ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _CandidateScoreRow extends StatelessWidget {
+  const _CandidateScoreRow({required this.project, required this.candidate});
+
+  final AnnotationProject project;
+  final LabelCandidate candidate;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = _labelFor(project, candidate.labelId);
+    return Padding(
+      padding: const EdgeInsets.only(top: 3),
+      child: Row(
+        children: [
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
+              color: label == null
+                  ? WorkbenchPalette.mutedForeground
+                  : Color(label.color),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              label?.name ?? '#${candidate.labelId}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+          Text(
+            '${(candidate.score * 100).round()}%',
+            style: Theme.of(
+              context,
+            ).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w800),
+          ),
+        ],
       ),
     );
   }

@@ -36,7 +36,6 @@ const _workbenchBorder = WorkbenchPalette.border;
 const _automaticBoxColor = Color(0xff5f6772);
 const _automaticBoxFillAlpha = 46;
 const _automaticBoxSelectedFillAlpha = 58;
-const _selectedBoxAlphaLabeled = 52;
 const _resizeHandleHitSize = 20.0;
 const _resizeHandleVisualSize = 11.0;
 const _resizeHandleRadius = 2.0;

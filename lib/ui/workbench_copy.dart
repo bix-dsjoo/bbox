@@ -107,6 +107,25 @@ class WorkbenchCopy {
   static const autoBoxesReplaceConfirm = '교체하고 실행';
   static const autoBoxesCancelled = '자동 박스 작업을 취소했습니다.';
   static const cancelAutoBoxes = '자동 박스 취소';
+  static const automaticLabel = '자동 라벨';
+  static const reviewRequired = '검토 필요';
+  static const unclassified = '미분류';
+  static const assignedLabel = '라벨 지정';
+  static const reviewReasonClassifierAmbiguous = '분류 결과가 애매합니다.';
+  static const reviewReasonVerifierFailed = '추가 검증을 통과하지 못했습니다.';
+  static const reviewReasonEdgeClipped = '객체가 이미지 가장자리에 걸쳐 있습니다.';
+  static const reviewReasonPossibleDuplicate = '겹치거나 중복된 박스일 수 있습니다.';
+
+  static String reviewReasonLabel(String reason) {
+    return switch (reason) {
+      'classifier_ambiguous' || 'low_margin' => reviewReasonClassifierAmbiguous,
+      'verifier_failed' => reviewReasonVerifierFailed,
+      'edge_clipped' => reviewReasonEdgeClipped,
+      'possible_duplicate' => reviewReasonPossibleDuplicate,
+      _ => '자동 라벨을 확인해 주세요.',
+    };
+  }
+
   static const automationTools = '자동화';
   static const editTools = '편집';
   static const viewTools = '보기';

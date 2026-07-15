@@ -732,6 +732,57 @@ void main() {
       expect(find.textContaining('h 20'), findsWidgets);
     });
 
+    testWidgets('review details show suggestion candidates and reason', (
+      tester,
+    ) async {
+      final reviewBox = project().images.first.boxes.single.copyWith(
+        automation: const BoxAutomationMetadata(
+          suggestedLabelId: 1,
+          candidates: [LabelCandidate(labelId: 1, score: 0.58)],
+          reviewReasons: ['low_margin'],
+          pipelineVersion: 'test-v1',
+          policyVersion: 'test-policy-v1',
+          detectorSha256: 'detector-hash',
+        ),
+      );
+      final controller = AppController()
+        ..loadProject(
+          project().copyWith(
+            images: [
+              project().images.first.copyWith(boxes: [reviewBox]),
+              project().images.last,
+            ],
+          ),
+        )
+        ..selectBox('box-1');
+
+      await tester.pumpWidget(app(controller));
+
+      final details = find.byKey(const ValueKey('selected-box-details'));
+      expect(
+        find.descendant(
+          of: details,
+          matching: find.text(WorkbenchCopy.reviewRequired),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: details,
+          matching: find.text(WorkbenchCopy.reviewReasonClassifierAmbiguous),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: details, matching: find.text('Person')),
+        findsWidgets,
+      );
+      expect(
+        find.descendant(of: details, matching: find.text('58%')),
+        findsOneWidget,
+      );
+    });
+
     testWidgets(
       'selected box details stay inside work tab while table row selection persists',
       (tester) async {
