@@ -475,6 +475,204 @@ void main() {
         expect(controller.sourceAvailability[2], SourceAvailability.available);
       },
     );
+
+    test('relink rebases source paths in both undo and redo history', () async {
+      final tempDir = await Directory.systemTemp.createTemp(
+        'bbox_controller_relink_history',
+      );
+      addTearDown(() => tempDir.delete(recursive: true));
+      final replacementPath = p.join(tempDir.path, 'replacement', 'bread.png');
+      await _writePng(replacementPath, width: 32, height: 24);
+      final controller = AppController()
+        ..loadProject(
+          _portableProject(
+            sourcePaths: [p.join(tempDir.path, 'old', 'bread.png')],
+          ),
+        );
+      controller.addLabel('Extra One', 0xff112233);
+      controller.addLabel('Extra Two', 0xff223344);
+      controller.undo();
+      await _waitForAvailability(controller, 1, SourceAvailability.missing);
+      expect(controller.canUndo, isTrue);
+      expect(controller.canRedo, isTrue);
+
+      await controller.relinkSourceFiles([replacementPath]);
+      controller.undo();
+      await _waitForAvailability(controller, 1, SourceAvailability.available);
+
+      expect(controller.project!.images.single.sourcePath, replacementPath);
+      expect(
+        controller.project!.images.single.importedFrom,
+        p.dirname(replacementPath),
+      );
+      expect(
+        controller.project!.labels.any((label) => label.name == 'Extra One'),
+        isFalse,
+      );
+
+      controller.redo();
+      await _waitForAvailability(controller, 1, SourceAvailability.available);
+      expect(controller.project!.images.single.sourcePath, replacementPath);
+      expect(
+        controller.project!.images.single.importedFrom,
+        p.dirname(replacementPath),
+      );
+      expect(
+        controller.project!.labels.any((label) => label.name == 'Extra One'),
+        isTrue,
+      );
+    });
+
+    test('relink invalidates in-flight detection for the old source', () async {
+      final tempDir = await Directory.systemTemp.createTemp(
+        'bbox_controller_relink_detection',
+      );
+      addTearDown(() => tempDir.delete(recursive: true));
+      final replacementPath = p.join(tempDir.path, 'replacement', 'bread.png');
+      await _writePng(replacementPath, width: 32, height: 24);
+      final detection = Completer<DetectionResult>();
+      final controller = AppController()
+        ..loadProject(
+          _portableProject(
+            sourcePaths: [p.join(tempDir.path, 'old', 'bread.png')],
+          ),
+        );
+      await controller.refreshSourceAvailability();
+
+      final pendingDetection = controller.detectSelectedImage(
+        replaceExisting: true,
+        detector: _RecordingDetector(
+          onDetect: (_, {imagePath, options = const DetectionOptions()}) =>
+              detection.future,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      await controller.relinkSourceFiles([replacementPath]);
+      detection.complete(
+        const DetectionResult(
+          detectorName: 'stale-detector',
+          boxes: [
+            BoundingBox(
+              id: 'stale-box',
+              x: 2,
+              y: 3,
+              width: 4,
+              height: 5,
+              status: BoxStatus.proposal,
+            ),
+          ],
+        ),
+      );
+      await pendingDetection;
+
+      expect(controller.project!.images.single.sourcePath, replacementPath);
+      expect(controller.project!.images.single.boxes.single.id, 'box-1');
+      expect(controller.isAutomationRunning, isFalse);
+      expect(controller.lastUserMessage, contains('Reconnected 1'));
+    });
+
+    test(
+      'relink invalidates in-flight classification for the old source',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_relink_classification',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final replacementPath = p.join(
+          tempDir.path,
+          'replacement',
+          'bread.png',
+        );
+        await _writePng(replacementPath, width: 32, height: 24);
+        final classification = Completer<DetectionResult>();
+        final runtime = FakeAutoBoxRuntime(
+          classifyHandler: (_, _) => classification.future,
+        );
+        final controller = AppController(autoBoxRuntime: runtime)
+          ..loadProject(
+            _portableProject(
+              sourcePaths: [p.join(tempDir.path, 'old', 'bread.png')],
+            ),
+          )
+          ..selectBox('box-1');
+        await controller.refreshSourceAvailability();
+        controller.moveSelectedBox(1, 0);
+        await _waitUntil(() => runtime.classifyCount == 1);
+
+        await controller.relinkSourceFiles([replacementPath]);
+        classification.complete(
+          const DetectionResult(
+            detectorName: 'stale-classifier',
+            pipelineVersion: 'pipeline-v1',
+            imageSha256: 'new-hash',
+            boxes: [
+              BoundingBox(
+                id: 'box-1',
+                x: 2,
+                y: 2,
+                width: 3,
+                height: 4,
+                status: BoxStatus.labeled,
+                labelId: 7,
+                labelSource: LabelSource.auto,
+              ),
+            ],
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        final image = controller.project!.images.single;
+        expect(image.sourcePath, replacementPath);
+        expect(image.boxes.single.status, BoxStatus.proposal);
+        expect(image.boxes.single.labelId, isNull);
+        expect(controller.lastUserMessage, contains('Reconnected 1'));
+      },
+    );
+
+    test(
+      'successful relink reports availability refresh failure as warning',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_relink_refresh_warning',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final replacementPath = p.join(
+          tempDir.path,
+          'replacement',
+          'bread.png',
+        );
+        await _writePng(replacementPath, width: 32, height: 24);
+        final service = _FailOnSecondInspectSourceRelinkService();
+        final controller = AppController(sourceRelinkService: service)
+          ..loadProject(
+            _portableProject(
+              sourcePaths: [p.join(tempDir.path, 'old', 'bread.png')],
+            ),
+          );
+        await controller.refreshSourceAvailability();
+
+        final result = await controller.relinkSourceFiles([replacementPath]);
+
+        expect(result.matchedCount, 1);
+        expect(controller.project!.images.single.sourcePath, replacementPath);
+        expect(controller.lastUserMessage, contains('Reconnected 1'));
+        expect(controller.lastUserMessage, contains('availability'));
+        expect(controller.lastUserMessage, isNot(contains('try again')));
+      },
+    );
+
+    test('undo consumes background availability refresh failure', () async {
+      final controller = AppController(
+        sourceRelinkService: _AlwaysFailingInspectSourceRelinkService(),
+      )..loadProject(_portableProject(sourcePaths: ['missing.png']));
+      controller.addLabel('Undo Label', 0xff334455);
+
+      controller.undo();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(controller.projectActivity, ProjectActivity.idle);
+      expect(controller.lastUserMessage, contains('Could not check source'));
+    });
   });
 
   group('AppController box editing', () {
@@ -1265,6 +1463,14 @@ Future<void> _waitForAvailability(
   fail('Timed out waiting for $expected availability for image $imageId.');
 }
 
+Future<void> _waitUntil(bool Function() condition) async {
+  for (var attempt = 0; attempt < 100; attempt++) {
+    if (condition()) return;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  fail('Timed out waiting for condition.');
+}
+
 class _DelayedInspectSourceRelinkService extends SourceRelinkService {
   _DelayedInspectSourceRelinkService();
 
@@ -1281,5 +1487,29 @@ class _DelayedInspectSourceRelinkService extends SourceRelinkService {
 
   void complete(Map<int, SourceAvailability> availability) {
     _completion.complete(availability);
+  }
+}
+
+class _FailOnSecondInspectSourceRelinkService extends SourceRelinkService {
+  int _inspectCount = 0;
+
+  @override
+  Future<Map<int, SourceAvailability>> inspectSources(
+    Iterable<AnnotatedImage> images,
+  ) {
+    _inspectCount++;
+    if (_inspectCount == 2) {
+      throw FileSystemException('Injected availability failure');
+    }
+    return super.inspectSources(images);
+  }
+}
+
+class _AlwaysFailingInspectSourceRelinkService extends SourceRelinkService {
+  @override
+  Future<Map<int, SourceAvailability>> inspectSources(
+    Iterable<AnnotatedImage> images,
+  ) {
+    throw FileSystemException('Injected availability failure');
   }
 }

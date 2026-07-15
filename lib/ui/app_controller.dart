@@ -36,6 +36,12 @@ class ImageViewLoadState {
 
 enum SelectedImageViewState { unknown, ready, missing }
 
+typedef ProjectSaveOperation =
+    Future<AnnotationProject> Function(
+      AnnotationProject project,
+      String projectFilePath,
+    );
+
 class ImageImportProgress {
   const ImageImportProgress({
     required this.total,
@@ -59,6 +65,7 @@ class AppController extends ChangeNotifier {
     ProjectLibrary? projectLibrary,
     ProjectSnapshotService? projectSnapshotService,
     SourceRelinkService? sourceRelinkService,
+    ProjectSaveOperation? projectSaver,
     AutoBoxRuntime? autoBoxRuntime,
     BoxLabelCache? boxLabelCache,
   }) : _projectLibrary = projectLibrary ?? ProjectLibrary.appData(),
@@ -66,6 +73,7 @@ class AppController extends ChangeNotifier {
            projectSnapshotService ?? ProjectSnapshotService(),
        _sourceRelinkService =
            sourceRelinkService ?? const SourceRelinkService(),
+       _projectSaver = projectSaver ?? ProjectStore.save,
        _autoBoxRuntime = autoBoxRuntime ?? defaultAutoBoxService(),
        _boxLabelCache = boxLabelCache ?? BoxLabelCache() {
     _autoBoxRuntime.addListener(_handleAutoBoxRuntimeChanged);
@@ -74,6 +82,7 @@ class AppController extends ChangeNotifier {
   final ProjectLibrary _projectLibrary;
   final ProjectSnapshotService _projectSnapshotService;
   final SourceRelinkService _sourceRelinkService;
+  final ProjectSaveOperation _projectSaver;
   final AutoBoxRuntime _autoBoxRuntime;
   final BoxLabelCache _boxLabelCache;
 
@@ -101,6 +110,7 @@ class AppController extends ChangeNotifier {
   final Map<int, String> _pipelineVersionsByImageId = {};
   Map<int, SourceAvailability> _sourceAvailability = const {};
   int _sourceRefreshGeneration = 0;
+  bool _isDisposed = false;
 
   final List<AnnotationProject> _undoStack = [];
   final List<AnnotationProject> _redoStack = [];
@@ -450,18 +460,16 @@ class AppController extends ChangeNotifier {
     final requestEpoch = _projectEpoch;
     try {
       await _waitForAutoSaveIdle();
-      if (requestEpoch != _projectEpoch) {
-        throw StateError(
-          'The active project changed. Choose the snapshot path and try again.',
-        );
-      }
+      if (_isDisposed || requestEpoch != _projectEpoch) return;
       await _projectSnapshotService.writeSnapshot(
         _requireProject(),
         targetPath,
       );
+      if (_isDisposed || requestEpoch != _projectEpoch) return;
       lastUserMessage = 'Project snapshot saved to $targetPath';
       notifyListeners();
     } catch (error) {
+      if (_isDisposed || requestEpoch != _projectEpoch) return;
       lastError = error;
       lastUserMessage =
           'Could not save the project snapshot. Check the destination path, permissions, and disk space, then try again.';
@@ -473,21 +481,27 @@ class AppController extends ChangeNotifier {
   Future<void> importProjectSnapshot(String sourcePath) async {
     final requestEpoch = _projectEpoch;
     try {
+      await _waitForAutoSaveIdle();
+      if (_isDisposed || requestEpoch != _projectEpoch) return;
       final source = await _projectSnapshotService.readSnapshot(sourcePath);
+      if (_isDisposed || requestEpoch != _projectEpoch) return;
       final imported = await _projectLibrary.importProject(source);
+      if (_isDisposed || requestEpoch != _projectEpoch) return;
       final entries = await _projectLibrary.listProjects();
-      if (requestEpoch != _projectEpoch) {
-        _projectLibraryEntries = entries;
-        notifyListeners();
-        return;
-      }
+      await _waitForAutoSaveIdle();
+      if (_isDisposed || requestEpoch != _projectEpoch) return;
       loadProject(imported);
       _currentLibraryProjectId = _libraryProjectIdForPath(
         imported.projectFilePath,
       );
       _projectLibraryEntries = entries;
-      await refreshSourceAvailability();
+      await _refreshSourceAvailabilityAfterPrimaryOperation(
+        projectEpoch: _projectEpoch,
+        warning:
+            'Project imported, but source availability could not be checked. Check storage access and refresh availability.',
+      );
     } catch (error) {
+      if (_isDisposed || requestEpoch != _projectEpoch) return;
       lastError = error;
       lastUserMessage =
           'Could not import the project snapshot. Verify the file and choose a writable project library, then try again.';
@@ -548,9 +562,9 @@ class AppController extends ChangeNotifier {
     ];
   }
 
-  Future<void> refreshSourceAvailability() async {
+  Future<void> refreshSourceAvailability({bool reportFailure = true}) async {
     final project = _project;
-    if (project == null) return;
+    if (project == null || _isDisposed) return;
     final projectEpoch = _projectEpoch;
     final generation = ++_sourceRefreshGeneration;
     _projectActivity = ProjectActivity.validating;
@@ -559,7 +573,8 @@ class AppController extends ChangeNotifier {
       final inspected = await _sourceRelinkService.inspectSources(
         project.images,
       );
-      if (projectEpoch != _projectEpoch ||
+      if (_isDisposed ||
+          projectEpoch != _projectEpoch ||
           generation != _sourceRefreshGeneration) {
         return;
       }
@@ -570,7 +585,9 @@ class AppController extends ChangeNotifier {
           image.id: inspected[image.id] ?? SourceAvailability.unknown,
       };
     } catch (error) {
-      if (projectEpoch == _projectEpoch &&
+      if (!_isDisposed &&
+          reportFailure &&
+          projectEpoch == _projectEpoch &&
           generation == _sourceRefreshGeneration) {
         lastError = error;
         lastUserMessage =
@@ -578,7 +595,8 @@ class AppController extends ChangeNotifier {
       }
       rethrow;
     } finally {
-      if (projectEpoch == _projectEpoch &&
+      if (!_isDisposed &&
+          projectEpoch == _projectEpoch &&
           generation == _sourceRefreshGeneration &&
           _projectActivity == ProjectActivity.validating) {
         _projectActivity = ProjectActivity.idle;
@@ -644,34 +662,64 @@ class AppController extends ChangeNotifier {
     notifyListeners();
     try {
       final result = await operation(missingImages);
-      if (projectEpoch != _projectEpoch) return result;
+      if (_isDisposed || projectEpoch != _projectEpoch) return result;
+      var appliedCount = 0;
       if (result.matchedPaths.isNotEmpty) {
         final project = _requireProject();
-        _project = project.copyWith(
-          images: [
-            for (final image in project.images)
-              if (result.matchedPaths.containsKey(image.id) &&
-                  originalPaths[image.id] == image.sourcePath)
-                image.copyWith(
-                  sourcePath: result.matchedPaths[image.id],
-                  importedFrom: result.matchedImportedFrom[image.id],
-                )
-              else
-                image,
-          ],
-        );
-        _scheduleAutoSave();
+        final appliedPaths = <int, String>{};
+        final appliedImportedFrom = <int, String>{};
+        for (final image in project.images) {
+          final matchedPath = result.matchedPaths[image.id];
+          if (matchedPath != null &&
+              originalPaths[image.id] == image.sourcePath) {
+            appliedPaths[image.id] = matchedPath;
+            final importedFrom = result.matchedImportedFrom[image.id];
+            if (importedFrom != null) {
+              appliedImportedFrom[image.id] = importedFrom;
+            }
+          }
+        }
+        appliedCount = appliedPaths.length;
+        if (appliedPaths.isNotEmpty) {
+          _project = _projectWithRelinkedSources(
+            project,
+            appliedPaths,
+            appliedImportedFrom,
+          );
+          for (var index = 0; index < _undoStack.length; index++) {
+            _undoStack[index] = _projectWithRelinkedSources(
+              _undoStack[index],
+              appliedPaths,
+              appliedImportedFrom,
+            );
+          }
+          for (var index = 0; index < _redoStack.length; index++) {
+            _redoStack[index] = _projectWithRelinkedSources(
+              _redoStack[index],
+              appliedPaths,
+              appliedImportedFrom,
+            );
+          }
+          _classificationDebounce?.cancel();
+          _classificationGeneration++;
+          _classificationPending = false;
+          _scheduleAutoSave();
+        }
       }
-      await refreshSourceAvailability();
-      if (projectEpoch == _projectEpoch) {
-        lastUserMessage = result.matchedCount > 0
-            ? 'Reconnected ${result.matchedCount} source file(s).'
+      final refreshed = await _refreshSourceAvailabilityAfterPrimaryOperation(
+        projectEpoch: projectEpoch,
+        warning:
+            'Reconnected $appliedCount source file(s), but source availability could not be checked. Check storage access and refresh availability.',
+      );
+      if (refreshed && !_isDisposed && projectEpoch == _projectEpoch) {
+        lastUserMessage = appliedCount > 0
+            ? 'Reconnected $appliedCount source file(s).'
             : 'No source files were reconnected. Review unresolved or ambiguous matches and choose a specific file if needed.';
         notifyListeners();
       }
       return result;
     } catch (error) {
-      if (projectEpoch == _projectEpoch) {
+      if (!_isDisposed && projectEpoch == _projectEpoch) {
         lastError = error;
         lastUserMessage =
             'Could not reconnect source files. Check the selected files, folder access, and image dimensions, then try again.';
@@ -679,12 +727,49 @@ class AppController extends ChangeNotifier {
       }
       rethrow;
     } finally {
-      if (projectEpoch == _projectEpoch &&
+      if (!_isDisposed &&
+          projectEpoch == _projectEpoch &&
           _projectActivity == ProjectActivity.validating) {
         _projectActivity = ProjectActivity.idle;
         notifyListeners();
       }
     }
+  }
+
+  Future<bool> _refreshSourceAvailabilityAfterPrimaryOperation({
+    required int projectEpoch,
+    required String warning,
+  }) async {
+    try {
+      await refreshSourceAvailability(reportFailure: false);
+      return !_isDisposed && projectEpoch == _projectEpoch;
+    } catch (error) {
+      if (!_isDisposed && projectEpoch == _projectEpoch) {
+        lastError = error;
+        lastUserMessage = warning;
+        notifyListeners();
+      }
+      return false;
+    }
+  }
+
+  AnnotationProject _projectWithRelinkedSources(
+    AnnotationProject project,
+    Map<int, String> matchedPaths,
+    Map<int, String> matchedImportedFrom,
+  ) {
+    return project.copyWith(
+      images: [
+        for (final image in project.images)
+          if (matchedPaths.containsKey(image.id))
+            image.copyWith(
+              sourcePath: matchedPaths[image.id],
+              importedFrom: matchedImportedFrom[image.id],
+            )
+          else
+            image,
+      ],
+    );
   }
 
   void removeImageFromProject(int imageId) {
@@ -889,6 +974,7 @@ class AppController extends ChangeNotifier {
     final activeDetector = detector ?? _autoBoxRuntime;
     final requestProjectEpoch = _projectEpoch;
     final requestImageId = image.id;
+    final requestSourcePath = image.sourcePath;
     final previousProject = project;
     final previousImage = image;
     final previousSelectedBoxId = _selectedBoxId;
@@ -904,7 +990,11 @@ class AppController extends ChangeNotifier {
         options: options,
       );
 
-      if (!_isCurrentAutoBoxRequest(requestProjectEpoch, requestImageId)) {
+      if (!_isCurrentAutoBoxRequest(
+        requestProjectEpoch,
+        requestImageId,
+        requestSourcePath,
+      )) {
         _clearStaleAutoBoxActivity(requestToken);
         return;
       }
@@ -946,7 +1036,11 @@ class AppController extends ChangeNotifier {
           : WorkbenchCopy.autoBoxesCreated(detectedBoxes.length);
       _scheduleAutoSave();
     } catch (error) {
-      if (!_isCurrentAutoBoxRequest(requestProjectEpoch, requestImageId)) {
+      if (!_isCurrentAutoBoxRequest(
+        requestProjectEpoch,
+        requestImageId,
+        requestSourcePath,
+      )) {
         _clearStaleAutoBoxActivity(requestToken);
         return;
       }
@@ -962,7 +1056,7 @@ class AppController extends ChangeNotifier {
     } finally {
       if (_activeAutoBoxRequestToken == requestToken) {
         _activeAutoBoxRequestToken = null;
-        notifyListeners();
+        if (!_isDisposed) notifyListeners();
       }
     }
   }
@@ -1003,6 +1097,7 @@ class AppController extends ChangeNotifier {
     final generation = ++_classificationGeneration;
     final projectEpoch = _projectEpoch;
     final imageId = image.id;
+    final sourcePath = image.sourcePath;
     final boxId = box.id;
     final resolvedPipelineVersion =
         pipelineVersion ??
@@ -1017,6 +1112,7 @@ class AppController extends ChangeNotifier {
           generation: generation,
           projectEpoch: projectEpoch,
           imageId: imageId,
+          sourcePath: sourcePath,
           boxId: boxId,
           x: box.x,
           y: box.y,
@@ -1032,6 +1128,7 @@ class AppController extends ChangeNotifier {
     required int generation,
     required int projectEpoch,
     required int imageId,
+    required String sourcePath,
     required String boxId,
     required double x,
     required double y,
@@ -1050,6 +1147,7 @@ class AppController extends ChangeNotifier {
       final image = _imageById(imageId);
       final box = _boxById(image, boxId);
       if (image == null ||
+          image.sourcePath != sourcePath ||
           box == null ||
           !_sameGeometry(box, x, y, width, height)) {
         return;
@@ -1075,6 +1173,7 @@ class AppController extends ChangeNotifier {
           box: cached.applyTo(box),
           generation: generation,
           projectEpoch: projectEpoch,
+          sourcePath: sourcePath,
           x: x,
           y: y,
           width: width,
@@ -1092,6 +1191,7 @@ class AppController extends ChangeNotifier {
         final currentImage = _imageById(imageId);
         final currentBox = _boxById(currentImage, boxId);
         if (currentImage == null ||
+            currentImage.sourcePath != sourcePath ||
             currentBox == null ||
             !_sameGeometry(currentBox, x, y, width, height) ||
             currentBox.status != BoxStatus.proposal ||
@@ -1136,6 +1236,7 @@ class AppController extends ChangeNotifier {
           box: normalized,
           generation: generation,
           projectEpoch: projectEpoch,
+          sourcePath: sourcePath,
           x: x,
           y: y,
           width: width,
@@ -1157,6 +1258,7 @@ class AppController extends ChangeNotifier {
     required BoundingBox box,
     required int generation,
     required int projectEpoch,
+    required String sourcePath,
     required double x,
     required double y,
     required double width,
@@ -1167,6 +1269,7 @@ class AppController extends ChangeNotifier {
     if (generation != _classificationGeneration ||
         projectEpoch != _projectEpoch ||
         currentImage == null ||
+        currentImage.sourcePath != sourcePath ||
         currentBox == null ||
         !_sameGeometry(currentBox, x, y, width, height)) {
       return;
@@ -1325,7 +1428,7 @@ class AppController extends ChangeNotifier {
     _project = _undoStack.removeLast();
     _repairSelection();
     _resetSourceAvailability(_project);
-    unawaited(refreshSourceAvailability());
+    _refreshSourceAvailabilityInBackground();
     notifyListeners();
   }
 
@@ -1340,7 +1443,7 @@ class AppController extends ChangeNotifier {
     _project = _redoStack.removeLast();
     _repairSelection();
     _resetSourceAvailability(_project);
-    unawaited(refreshSourceAvailability());
+    _refreshSourceAvailabilityInBackground();
     notifyListeners();
   }
 
@@ -1644,13 +1747,20 @@ class AppController extends ChangeNotifier {
     );
   }
 
-  bool _isCurrentAutoBoxRequest(int requestProjectEpoch, int requestImageId) {
-    return _project != null &&
+  bool _isCurrentAutoBoxRequest(
+    int requestProjectEpoch,
+    int requestImageId,
+    String requestSourcePath,
+  ) {
+    return !_isDisposed &&
+        _project != null &&
         _projectEpoch == requestProjectEpoch &&
-        _selectedImageId == requestImageId;
+        _selectedImageId == requestImageId &&
+        _imageById(requestImageId)?.sourcePath == requestSourcePath;
   }
 
   void _clearStaleAutoBoxActivity(int requestToken) {
+    if (_isDisposed) return;
     final activeToken = _activeAutoBoxRequestToken;
     if (activeToken != null && activeToken != requestToken) {
       return;
@@ -1683,7 +1793,7 @@ class AppController extends ChangeNotifier {
   }
 
   void _handleAutoBoxRuntimeChanged() {
-    notifyListeners();
+    if (!_isDisposed) notifyListeners();
   }
 
   void _editSelectedBox(
@@ -1727,34 +1837,48 @@ class AppController extends ChangeNotifier {
   }
 
   void _scheduleAutoSave() {
-    final path = _project?.projectFilePath;
-    if (path == null) {
+    final projectSnapshot = _project;
+    final path = projectSnapshot?.projectFilePath;
+    if (projectSnapshot == null || path == null || _isDisposed) {
       return;
     }
+    final projectEpoch = _projectEpoch;
+    final libraryProjectId = _currentLibraryProjectId;
     _saveStatus = SaveStatus.saving;
     _lastSaveError = null;
     notifyListeners();
-    _autoSaveChain = _autoSaveChain
-        .then((_) async {
-          final project = _project;
-          if (project == null) {
-            return;
-          }
-          _project = await ProjectStore.save(project, path);
-          _currentLibraryProjectId = _libraryProjectIdForPath(
-            _project!.projectFilePath,
-          );
-          await _refreshLibraryEntryIfNeeded();
-          _saveStatus = SaveStatus.saved;
-          _lastSaveError = null;
-          notifyListeners();
-        })
-        .catchError((Object error) {
-          lastError = error;
-          _lastSaveError = error;
-          _saveStatus = SaveStatus.failed;
-          notifyListeners();
-        });
+    _autoSaveChain = _autoSaveChain.then((_) async {
+      try {
+        final saved = await _projectSaver(projectSnapshot, path);
+        await _refreshLibraryEntryForAutoSave(
+          saved,
+          libraryProjectId: libraryProjectId,
+        );
+        if (_isDisposed ||
+            projectEpoch != _projectEpoch ||
+            _project?.projectFilePath != path) {
+          return;
+        }
+        if (!identical(_project, projectSnapshot)) return;
+        _project = saved;
+        _currentLibraryProjectId = _libraryProjectIdForPath(
+          saved.projectFilePath,
+        );
+        _saveStatus = SaveStatus.saved;
+        _lastSaveError = null;
+        notifyListeners();
+      } catch (error) {
+        if (_isDisposed ||
+            projectEpoch != _projectEpoch ||
+            _project?.projectFilePath != path) {
+          return;
+        }
+        lastError = error;
+        _lastSaveError = error;
+        _saveStatus = SaveStatus.failed;
+        notifyListeners();
+      }
+    });
     unawaited(_autoSaveChain);
   }
 
@@ -1766,12 +1890,36 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  void _refreshSourceAvailabilityInBackground() {
+    unawaited(_consumeSourceAvailabilityRefresh());
+  }
+
+  Future<void> _consumeSourceAvailabilityRefresh() async {
+    try {
+      await refreshSourceAvailability();
+    } catch (_) {
+      // The refresh method already exposes an actionable warning to the UI.
+    }
+  }
+
   void _resetSourceAvailability(AnnotationProject? project) {
     _sourceRefreshGeneration++;
     _sourceAvailability = {
       for (final image in project?.images ?? const <AnnotatedImage>[])
         image.id: SourceAvailability.unknown,
     };
+  }
+
+  Future<void> _refreshLibraryEntryForAutoSave(
+    AnnotationProject project, {
+    required String? libraryProjectId,
+  }) async {
+    if (libraryProjectId == null) return;
+    await _projectLibrary.refreshEntry(project);
+    final entries = await _projectLibrary.listProjects();
+    if (!_isDisposed) {
+      _projectLibraryEntries = entries;
+    }
   }
 
   Future<void> _refreshLibraryEntryIfNeeded() async {
@@ -1806,6 +1954,7 @@ class AppController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _isDisposed = true;
     _projectEpoch++;
     _sourceRefreshGeneration++;
     _classificationDebounce?.cancel();

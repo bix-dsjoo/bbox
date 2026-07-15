@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:bbox_labeler/annotation/models.dart';
@@ -9,6 +10,8 @@ import 'package:bbox_labeler/ui/app_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
+
+import '../support/fake_auto_box_runtime.dart';
 
 void main() {
   group('AppController project library', () {
@@ -250,6 +253,177 @@ void main() {
       expect(controller.projectLibraryEntries.single.confirmedImageCount, 1);
     });
 
+    test('autosaves immutable snapshots before activating an import', () async {
+      final saveStarted = [Completer<void>(), Completer<void>()];
+      final saveGates = [Completer<void>(), Completer<void>()];
+      final savedSnapshots = <AnnotationProject>[];
+      var saveIndex = 0;
+      final serializedController = AppController(
+        projectLibrary: library,
+        projectSaver: (project, path) async {
+          final index = saveIndex++;
+          savedSnapshots.add(project);
+          saveStarted[index].complete();
+          await saveGates[index].future;
+          return ProjectStore.save(project, path);
+        },
+      );
+      await serializedController.createLibraryProject('Old Project');
+      final transferPath = p.join(tempDir.path, 'incoming.bbox.json');
+      await ProjectSnapshotService().writeSnapshot(
+        AnnotationProject.empty(
+          name: 'Imported Project',
+        ).copyWith(status: ProjectStatus.ready),
+        transferPath,
+      );
+
+      serializedController.addLabel('First Pending Label', 0xff112233);
+      serializedController.addLabel('Second Pending Label', 0xff223344);
+      final import = serializedController.importProjectSnapshot(transferPath);
+
+      await saveStarted[0].future;
+      expect(
+        savedSnapshots[0].labels.any(
+          (label) => label.name == 'First Pending Label',
+        ),
+        isTrue,
+      );
+      expect(
+        savedSnapshots[0].labels.any(
+          (label) => label.name == 'Second Pending Label',
+        ),
+        isFalse,
+      );
+      expect(serializedController.project!.name, 'Old Project');
+      saveGates[0].complete();
+
+      await saveStarted[1].future;
+      expect(
+        savedSnapshots[1].labels.any(
+          (label) => label.name == 'Second Pending Label',
+        ),
+        isTrue,
+      );
+      expect(serializedController.project!.name, 'Old Project');
+      saveGates[1].complete();
+      await import;
+
+      expect(serializedController.project!.name, 'Imported Project');
+      expect(
+        serializedController.project!.labels.any(
+          (label) => label.name == 'First Pending Label',
+        ),
+        isFalse,
+      );
+    });
+
+    test(
+      'dispose during snapshot save does not notify after disposal',
+      () async {
+        final snapshotService = _BlockingWriteSnapshotService();
+        final disposableController = AppController(
+          projectLibrary: library,
+          projectSnapshotService: snapshotService,
+          autoBoxRuntime: FakeAutoBoxRuntime(),
+        )..createProject('Disposable Save');
+
+        final save = disposableController.saveProjectSnapshot(
+          p.join(tempDir.path, 'blocked-save.bbox.json'),
+        );
+        await snapshotService.started.future;
+        disposableController.dispose();
+        snapshotService.release.complete();
+
+        await expectLater(save, completes);
+      },
+    );
+
+    test(
+      'project switch during snapshot save suppresses stale messages',
+      () async {
+        final snapshotService = _BlockingWriteSnapshotService();
+        final switchingController = AppController(
+          projectLibrary: library,
+          projectSnapshotService: snapshotService,
+        )..createProject('First Project');
+
+        final save = switchingController.saveProjectSnapshot(
+          p.join(tempDir.path, 'switch-save.bbox.json'),
+        );
+        await snapshotService.started.future;
+        switchingController.loadProject(
+          AnnotationProject.empty(name: 'Second Project'),
+        );
+        snapshotService.release.complete();
+        await save;
+
+        expect(switchingController.project!.name, 'Second Project');
+        expect(switchingController.lastUserMessage, isNull);
+        expect(switchingController.lastError, isNull);
+      },
+    );
+
+    test(
+      'dispose during snapshot import stops before library mutation',
+      () async {
+        final snapshotService = _BlockingReadSnapshotService();
+        final disposableController = AppController(
+          projectLibrary: library,
+          projectSnapshotService: snapshotService,
+          autoBoxRuntime: FakeAutoBoxRuntime(),
+        );
+
+        final import = disposableController.importProjectSnapshot(
+          'blocked.json',
+        );
+        await snapshotService.started.future;
+        disposableController.dispose();
+        snapshotService.result.complete(
+          AnnotationProject.empty(name: 'Must Not Import'),
+        );
+
+        await expectLater(import, completes);
+        expect(await library.listProjects(), isEmpty);
+      },
+    );
+
+    test(
+      'successful import reports availability refresh failure as warning',
+      () async {
+        final transferPath = p.join(tempDir.path, 'warning-import.bbox.json');
+        await ProjectSnapshotService().writeSnapshot(
+          AnnotationProject.empty(name: 'Imported With Warning').copyWith(
+            images: const [
+              AnnotatedImage(
+                id: 1,
+                sourcePath: 'missing.png',
+                displayName: 'missing.png',
+                width: 10,
+                height: 10,
+                status: ImageStatus.confirmed,
+              ),
+            ],
+          ),
+          transferPath,
+        );
+        final warningController = AppController(
+          projectLibrary: library,
+          sourceRelinkService: _FailingAvailabilityService(),
+        );
+
+        await warningController.importProjectSnapshot(transferPath);
+
+        expect(warningController.project!.name, 'Imported With Warning');
+        expect(warningController.projectLibraryEntries, isNotEmpty);
+        expect(warningController.lastUserMessage, contains('imported'));
+        expect(warningController.lastUserMessage, contains('availability'));
+        expect(
+          warningController.lastUserMessage,
+          isNot(contains('Could not import')),
+        );
+      },
+    );
+
     test('returns to project home after saving the current project', () async {
       await controller.createLibraryProject('Home Demo');
       controller.loadProject(
@@ -293,6 +467,40 @@ void main() {
       expect(controller.lastSaveError, isA<StateError>());
     });
   });
+}
+
+class _BlockingWriteSnapshotService extends ProjectSnapshotService {
+  final started = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  Future<void> writeSnapshot(
+    AnnotationProject project,
+    String targetPath,
+  ) async {
+    started.complete();
+    await release.future;
+  }
+}
+
+class _BlockingReadSnapshotService extends ProjectSnapshotService {
+  final started = Completer<void>();
+  final result = Completer<AnnotationProject>();
+
+  @override
+  Future<AnnotationProject> readSnapshot(String path) {
+    started.complete();
+    return result.future;
+  }
+}
+
+class _FailingAvailabilityService extends SourceRelinkService {
+  @override
+  Future<Map<int, SourceAvailability>> inspectSources(
+    Iterable<AnnotatedImage> images,
+  ) {
+    throw FileSystemException('Injected availability failure');
+  }
 }
 
 Future<void> _deleteTempDir(Directory directory) async {
