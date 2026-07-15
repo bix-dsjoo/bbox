@@ -9,6 +9,7 @@ export 'package:bbox_labeler/ui/app_controller.dart';
 export 'package:bbox_labeler/ui/app_theme.dart';
 export 'package:bbox_labeler/ui/coco_export_destination_picker.dart';
 export 'package:bbox_labeler/ui/image_import_picker.dart';
+export 'package:bbox_labeler/ui/project_transfer_picker.dart';
 export 'package:bbox_labeler/ui/workbench_copy.dart';
 export 'package:bbox_labeler/ui/workbench_screen.dart';
 export 'package:flutter/foundation.dart';
@@ -21,6 +22,7 @@ import 'package:bbox_labeler/annotation/models.dart';
 import 'package:bbox_labeler/ui/app_controller.dart';
 import 'package:bbox_labeler/ui/coco_export_destination_picker.dart';
 import 'package:bbox_labeler/ui/image_import_picker.dart';
+import 'package:bbox_labeler/ui/project_transfer_picker.dart';
 import 'package:bbox_labeler/ui/workbench_screen.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -38,6 +40,8 @@ Widget app(
   ImageImportPicker imageImportPicker = const FakeImageImportPicker(),
   CocoExportDestinationPicker exportDestinationPicker =
       const FakeCocoExportDestinationPicker(),
+  ProjectTransferPicker projectTransferPicker =
+      const FakeProjectTransferPicker(),
   Future<void> Function(String path)? exportWriter,
 }) {
   return MaterialApp(
@@ -45,9 +49,36 @@ Widget app(
       controller: controller,
       imageImportPicker: imageImportPicker,
       exportDestinationPicker: exportDestinationPicker,
+      projectTransferPicker: projectTransferPicker,
       exportWriter: exportWriter,
     ),
   );
+}
+
+class FakeProjectTransferPicker extends ProjectTransferPicker {
+  const FakeProjectTransferPicker({
+    this.importPath,
+    this.snapshotPath,
+    this.onPickImport,
+    this.onPickSnapshot,
+  });
+
+  final String? importPath;
+  final String? snapshotPath;
+  final VoidCallback? onPickImport;
+  final VoidCallback? onPickSnapshot;
+
+  @override
+  Future<String?> pickImportFile() {
+    onPickImport?.call();
+    return SynchronousFuture(importPath);
+  }
+
+  @override
+  Future<String?> pickSnapshotDestination() {
+    onPickSnapshot?.call();
+    return SynchronousFuture(snapshotPath);
+  }
 }
 
 class FakeCocoExportDestinationPicker extends CocoExportDestinationPicker {

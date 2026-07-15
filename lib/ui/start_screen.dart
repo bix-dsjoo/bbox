@@ -3,11 +3,17 @@ import 'package:flutter/material.dart';
 import 'app_controller.dart';
 import 'app_theme.dart';
 import 'project_home_copy.dart';
+import 'project_transfer_picker.dart';
 
 class StartScreen extends StatefulWidget {
-  const StartScreen({super.key, required this.controller});
+  const StartScreen({
+    super.key,
+    required this.controller,
+    required this.projectTransferPicker,
+  });
 
   final AppController controller;
+  final ProjectTransferPicker projectTransferPicker;
 
   @override
   State<StartScreen> createState() => _StartScreenState();
@@ -92,6 +98,24 @@ class _StartScreenState extends State<StartScreen> {
                             ),
                           ),
                         ],
+                      ),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: Tooltip(
+                          message: ProjectHomeCopy.importProjectFileHint,
+                          child: OutlinedButton.icon(
+                            key: const ValueKey('import-project-file'),
+                            onPressed: _importProjectFile,
+                            icon: const Icon(
+                              Icons.file_open_outlined,
+                              size: 18,
+                            ),
+                            label: const Text(
+                              ProjectHomeCopy.importProjectFile,
+                            ),
+                          ),
+                        ),
                       ),
                       if (widget.controller.isProjectLibraryLoading)
                         const LinearProgressIndicator()
@@ -225,6 +249,23 @@ class _StartScreenState extends State<StartScreen> {
         return;
       }
       setState(() => _error = error);
+    }
+  }
+
+  Future<void> _importProjectFile() async {
+    try {
+      final path = await widget.projectTransferPicker.pickImportFile();
+      if (path == null) {
+        return;
+      }
+      await widget.controller.importProjectSnapshot(path);
+      if (mounted) {
+        setState(() => _error = null);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = error);
+      }
     }
   }
 

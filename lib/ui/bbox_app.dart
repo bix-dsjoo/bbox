@@ -6,13 +6,19 @@ import 'package:forui/forui.dart';
 import 'app_controller.dart';
 import 'app_theme.dart';
 import 'project_home_copy.dart';
+import 'project_transfer_picker.dart';
 import 'start_screen.dart';
 import 'workbench_screen.dart';
 
 class BboxApp extends StatefulWidget {
-  const BboxApp({super.key, this.controller});
+  const BboxApp({
+    super.key,
+    this.controller,
+    this.projectTransferPicker = const WindowsProjectTransferPicker(),
+  });
 
   final AppController? controller;
+  final ProjectTransferPicker projectTransferPicker;
 
   @override
   State<BboxApp> createState() => _BboxAppState();
@@ -68,9 +74,15 @@ class _BboxAppState extends State<BboxApp> with WidgetsBindingObserver {
         animation: _controller,
         builder: (context, _) {
           if (!_controller.hasProject) {
-            return StartScreen(controller: _controller);
+            return StartScreen(
+              controller: _controller,
+              projectTransferPicker: widget.projectTransferPicker,
+            );
           }
-          return WorkbenchScreen(controller: _controller);
+          return WorkbenchScreen(
+            controller: _controller,
+            projectTransferPicker: widget.projectTransferPicker,
+          );
         },
       ),
     );

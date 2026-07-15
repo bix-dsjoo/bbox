@@ -3,12 +3,16 @@ import 'dart:io';
 import 'package:bbox_labeler/ui/app_controller.dart';
 import 'package:bbox_labeler/ui/bbox_app.dart';
 import 'package:bbox_labeler/ui/app_theme.dart';
+import 'package:bbox_labeler/annotation/models.dart';
+import 'package:bbox_labeler/project/project_snapshot_service.dart';
+import 'package:bbox_labeler/ui/project_home_copy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
 import '../support/fake_auto_box_runtime.dart';
 import '../support/memory_project_library.dart';
+import 'workbench/workbench_test_support.dart' show FakeProjectTransferPicker;
 
 void main() {
   group('Project home', () {
@@ -67,6 +71,77 @@ void main() {
         find.byKey(const ValueKey('empty-workbench-import-images')),
         findsOneWidget,
       );
+    });
+
+    testWidgets('imports a project file and opens its managed workbench', (
+      tester,
+    ) async {
+      final tempDir = Directory.systemTemp.createTempSync(
+        'bbox_project_home_import',
+      );
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      final snapshotPath = p.join(tempDir.path, 'portable.bbox.json');
+      await tester.runAsync(
+        () => ProjectSnapshotService().writeSnapshot(
+          AnnotationProject.empty(name: 'Portable Project'),
+          snapshotPath,
+        ),
+      );
+      var pickerCalls = 0;
+
+      await tester.pumpWidget(
+        BboxApp(
+          controller: controller,
+          projectTransferPicker: FakeProjectTransferPicker(
+            importPath: snapshotPath,
+            onPickImport: () => pickerCalls += 1,
+          ),
+        ),
+      );
+      await tester.pump();
+      await _pumpRealAsync(tester);
+
+      expect(find.byKey(const ValueKey('import-project-file')), findsOneWidget);
+      expect(find.text(ProjectHomeCopy.importProjectFile), findsOneWidget);
+      expect(
+        find.byTooltip(ProjectHomeCopy.importProjectFileHint),
+        findsOneWidget,
+      );
+
+      await tester.runAsync(() async {
+        await tester.tap(find.byKey(const ValueKey('import-project-file')));
+        for (var attempt = 0; attempt < 50; attempt += 1) {
+          if (controller.hasProject) return;
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+      });
+      await tester.pump();
+
+      expect(pickerCalls, 1);
+      expect(controller.project!.name, 'Portable Project');
+      expect(controller.project!.projectFilePath, isNot(snapshotPath));
+      expect(find.byKey(const ValueKey('workbench-shell')), findsOneWidget);
+    });
+
+    testWidgets('cancelling project file import keeps the home error-free', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        BboxApp(
+          controller: controller,
+          projectTransferPicker: const FakeProjectTransferPicker(),
+        ),
+      );
+      await tester.pump();
+      await _pumpRealAsync(tester);
+
+      await tester.runAsync(
+        () => tester.tap(find.byKey(const ValueKey('import-project-file'))),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('project-home')), findsOneWidget);
+      expect(find.textContaining('프로젝트 작업을 완료하지 못했습니다'), findsNothing);
     });
 
     testWidgets('returning launch lists and opens saved projects', (

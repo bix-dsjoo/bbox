@@ -65,6 +65,73 @@ void main() {
       expect(find.byKey(const ValueKey('save-status-saved')), findsOneWidget);
     });
 
+    testWidgets(
+      'saves a project copy without replacing the internal project path',
+      (tester) async {
+        final tempDir = Directory.systemTemp.createTempSync(
+          'bbox_workbench_snapshot',
+        );
+        addTearDown(() => tempDir.deleteSync(recursive: true));
+        final internalPath =
+            '${tempDir.path}${Platform.pathSeparator}library'
+            '${Platform.pathSeparator}project.bbox.json';
+        final snapshotPath =
+            '${tempDir.path}${Platform.pathSeparator}portable.bbox.json';
+        final controller = AppController()
+          ..createProject('demo', projectFilePath: internalPath);
+        addTearDown(controller.dispose);
+        var pickerCalls = 0;
+
+        await tester.pumpWidget(
+          app(
+            controller,
+            projectTransferPicker: FakeProjectTransferPicker(
+              snapshotPath: snapshotPath,
+              onPickSnapshot: () => pickerCalls += 1,
+            ),
+          ),
+        );
+
+        expect(find.byKey(const ValueKey('save-project-copy')), findsOneWidget);
+        expect(find.byTooltip(WorkbenchCopy.saveProjectFile), findsOneWidget);
+
+        await tester.runAsync(
+          () => tester.tap(find.byKey(const ValueKey('save-project-copy'))),
+        );
+        await tester.pump();
+        await tester.runAsync(() async {
+          for (var attempt = 0; attempt < 100; attempt += 1) {
+            if (await File(snapshotPath).exists()) return;
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+          }
+        });
+        await tester.pump();
+
+        expect(pickerCalls, 1);
+        expect(File(snapshotPath).existsSync(), isTrue);
+        expect(controller.project!.projectFilePath, internalPath);
+        expect(
+          find.text(WorkbenchCopy.projectFileSaved(snapshotPath)),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('save-project')), findsOneWidget);
+      },
+    );
+
+    testWidgets('cancelling project copy save shows no feedback', (
+      tester,
+    ) async {
+      final controller = AppController()
+        ..createProject('demo', projectFilePath: 'internal.bbox.json');
+
+      await tester.pumpWidget(app(controller));
+      await tester.tap(find.byKey(const ValueKey('save-project-copy')));
+      await tester.pump();
+
+      expect(find.byType(SnackBar), findsNothing);
+      expect(controller.project!.projectFilePath, 'internal.bbox.json');
+    });
+
     testWidgets('top bar groups context status document and edit actions', (
       tester,
     ) async {

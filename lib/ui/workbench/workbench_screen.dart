@@ -19,6 +19,7 @@ import '../coco_export_destination_picker.dart';
 import '../coco_export_warning_dialog.dart';
 import '../image_import_picker.dart';
 import '../label_management_popover.dart';
+import '../project_transfer_picker.dart';
 import '../workbench_copy.dart';
 
 part 'workbench_shared.dart';
@@ -98,12 +99,14 @@ class WorkbenchScreen extends StatelessWidget {
     required this.controller,
     this.imageImportPicker = const WindowsImageImportPicker(),
     this.exportDestinationPicker = const WindowsCocoExportDestinationPicker(),
+    this.projectTransferPicker = const WindowsProjectTransferPicker(),
     this.exportWriter,
   });
 
   final AppController controller;
   final ImageImportPicker imageImportPicker;
   final CocoExportDestinationPicker exportDestinationPicker;
+  final ProjectTransferPicker projectTransferPicker;
   final Future<void> Function(String path)? exportWriter;
 
   @override
@@ -207,6 +210,30 @@ class WorkbenchScreen extends StatelessWidget {
                                         : () => _showExportWarnings(context),
                                     icon: const Icon(Icons.ios_share),
                                     label: const Text(WorkbenchCopy.cocoExport),
+                                  ),
+                                ),
+                                Tooltip(
+                                  message: WorkbenchCopy.saveProjectFile,
+                                  child: TextButton.icon(
+                                    key: const ValueKey('save-project-copy'),
+                                    onPressed: busyForProjectMutation
+                                        ? null
+                                        : () => _saveProjectCopy(context),
+                                    style: TextButton.styleFrom(
+                                      minimumSize: const Size(0, 36),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 2,
+                                      ),
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                    icon: const Icon(
+                                      Icons.save_as_outlined,
+                                      size: 18,
+                                    ),
+                                    label: const Text(
+                                      WorkbenchCopy.saveProjectFile,
+                                    ),
                                   ),
                                 ),
                               ],
@@ -403,6 +430,25 @@ class WorkbenchScreen extends StatelessWidget {
     } catch (error) {
       if (context.mounted) {
         _showError(context, '프로젝트를 저장하지 못했습니다. $error');
+      }
+    }
+  }
+
+  Future<void> _saveProjectCopy(BuildContext context) async {
+    try {
+      final path = await projectTransferPicker.pickSnapshotDestination();
+      if (path == null) {
+        return;
+      }
+      await controller.saveProjectSnapshot(path);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(WorkbenchCopy.projectFileSaved(path))),
+        );
+      }
+    } catch (error) {
+      if (context.mounted) {
+        _showError(context, WorkbenchCopy.projectFileSaveFailed(error));
       }
     }
   }

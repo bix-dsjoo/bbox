@@ -7,6 +7,8 @@ class ProjectHomeCopy {
   static const projectName = '프로젝트 이름';
   static const defaultProjectName = '새 라벨링 프로젝트';
   static const createProject = '만들기';
+  static const importProjectFile = '프로젝트 파일 가져오기';
+  static const importProjectFileHint = '다른 PC에서 저장한 BBox 프로젝트를 가져옵니다.';
   static const noProjects = '프로젝트가 없습니다';
   static const noProjectsMessage = '새 프로젝트를 만들어 이미지 라벨링을 시작하세요.';
   static const projectActions = '프로젝트 작업';

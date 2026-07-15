@@ -12,6 +12,7 @@ class WorkbenchCopy {
   static const projectHome = '프로젝트 홈';
   static const projectHomeTooltip = '프로젝트 홈으로 돌아가기';
   static const saveProjectTooltip = '프로젝트 저장';
+  static const saveProjectFile = '프로젝트 파일 저장';
   static const undo = '실행 취소';
   static const redo = '다시 실행';
   static const imageFolder = '이미지 폴더';
@@ -161,6 +162,11 @@ class WorkbenchCopy {
   }
 
   static String autoBoxesCreated(int count) => '자동 박스 $count개 생성';
+
+  static String projectFileSaved(String path) => '프로젝트 파일을 저장했습니다: $path';
+
+  static String projectFileSaveFailed(Object error) =>
+      '프로젝트 파일을 저장하지 못했습니다. 경로와 권한을 확인한 뒤 다시 시도하세요: $error';
 
   static String exportAutoLabeledBoxes(int count) => '자동 라벨 박스: $count';
 
