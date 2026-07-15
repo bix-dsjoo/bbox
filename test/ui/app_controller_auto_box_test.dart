@@ -179,21 +179,61 @@ void main() {
 
   test('new manual box is classified after drawing completes', () async {
     final runtime = FakeAutoBoxRuntime();
-    final sourceProject = _project();
     final controller = AppController(autoBoxRuntime: runtime)
-      ..loadProject(
-        sourceProject.copyWith(
-          images: [
-            sourceProject.images.first.copyWith(contentSha256: 'image-hash'),
-          ],
-        ),
-      );
+      ..loadProject(_project());
     addTearDown(controller.dispose);
 
     controller.addBox(x: 10, y: 12, width: 20, height: 24);
     await Future<void>.delayed(const Duration(milliseconds: 300));
 
     expect(runtime.classifyCount, 1);
+  });
+
+  test('latest edit is classified after an earlier request finishes', () async {
+    final first = Completer<DetectionResult>();
+    late final FakeAutoBoxRuntime runtime;
+    runtime = FakeAutoBoxRuntime(
+      classifyHandler: (_, boxes) {
+        if (runtime.classifyCount == 1) return first.future;
+        final box = boxes.single;
+        return Future.value(_acceptedClassificationResult(x: box.x));
+      },
+    );
+    final controller = AppController(autoBoxRuntime: runtime)
+      ..loadProject(_autoLabeledProject())
+      ..selectBox('auto-box');
+    addTearDown(controller.dispose);
+
+    controller.moveSelectedBox(1, 0);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    controller.moveSelectedBox(1, 0);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    first.complete(_acceptedClassificationResult(x: 11));
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+
+    expect(runtime.classifyCount, 2);
+    expect(controller.selectedBox!.x, 12);
+    expect(controller.selectedBox!.isAutoLabeled, isTrue);
+  });
+
+  test('manual label wins over an in-flight automatic result', () async {
+    final classification = Completer<DetectionResult>();
+    final runtime = FakeAutoBoxRuntime(
+      classifyHandler: (_, _) => classification.future,
+    );
+    final controller = AppController(autoBoxRuntime: runtime)
+      ..loadProject(_autoLabeledProject())
+      ..selectBox('auto-box');
+    addTearDown(controller.dispose);
+
+    controller.moveSelectedBox(1, 0);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    controller.assignSelectedBoxLabel(1);
+    classification.complete(_acceptedClassificationResult(x: 11));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.selectedBox!.labelId, 1);
+    expect(controller.selectedBox!.labelSource, LabelSource.user);
   });
 
   test('failed service remains manually retryable', () async {

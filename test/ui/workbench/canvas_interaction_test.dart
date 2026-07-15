@@ -109,7 +109,7 @@ void main() {
         find.byKey(const ValueKey('image-canvas')),
         const Offset(80, 60),
       );
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
       expect(controller.selectedImage!.boxCount, initialCount + 1);
       expect(controller.selectedBoxId, startsWith('manual-'));
@@ -119,7 +119,7 @@ void main() {
         const Offset(-60, -40),
         warnIfMissed: false,
       );
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
       expect(controller.selectedImage!.boxCount, initialCount + 2);
     });
@@ -148,7 +148,7 @@ void main() {
         find.byKey(const ValueKey('box-box-1')),
       );
       await tester.dragFrom(existingBoxRect.center, const Offset(90, 70));
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
       expect(controller.selectedImage!.boxCount, initialCount + 1);
       final drawn = controller.selectedBox!;
@@ -184,7 +184,7 @@ void main() {
         );
         final start = Offset(panelRect.left + 52, panelRect.center.dy);
         await tester.dragFrom(start, const Offset(80, 60));
-        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
 
         expect(controller.selectedImage!.boxCount, initialCount + 1);
         expect(controller.selectedBox!.id, startsWith('manual-'));
@@ -286,7 +286,7 @@ void main() {
           find.byKey(const ValueKey('box-box-1')),
           const Offset(90, 30),
         );
-        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
 
         final afterImage = tester.getRect(
           find.byKey(const ValueKey('canvas-image')),
@@ -407,7 +407,7 @@ void main() {
         find.byKey(const ValueKey('selected-box-box-1')),
         const Offset(12, 8),
       );
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
       final after = controller.selectedImage!.boxes.single;
       expect(after.x, greaterThan(before.x));
@@ -428,7 +428,7 @@ void main() {
         find.byKey(const ValueKey('selected-box-box-1')),
         const Offset(20, 0),
       );
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
       final unzoomedAfter = unzoomedController.selectedImage!.boxes.single;
       final unzoomedDelta = unzoomedAfter.x - unzoomedBefore.x;
 
@@ -442,7 +442,7 @@ void main() {
         find.byKey(const ValueKey('selected-box-box-1')),
         const Offset(20, 0),
       );
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
       final zoomedAfter = zoomedController.selectedImage!.boxes.single;
       final zoomedDelta = zoomedAfter.x - zoomedBefore.x;
 
@@ -598,7 +598,7 @@ void main() {
         await tester.tapAt(boxCenter);
         await tester.pump();
         await tester.dragFrom(boxCenter, const Offset(24, 18));
-        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
 
         final movedBox = controller.selectedImage!.boxes.single;
         expect(movedBox.x, greaterThan(initialBox.x));
@@ -608,7 +608,7 @@ void main() {
           find.byKey(const ValueKey('resize-handle-box-1-bottomRight')),
         );
         await tester.dragFrom(bottomRight, const Offset(18, 12));
-        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
 
         final resizedBox = controller.selectedImage!.boxes.single;
         expect(resizedBox.width, greaterThan(movedBox.width));
@@ -623,7 +623,7 @@ void main() {
           find.byKey(const ValueKey('selected-box-box-1')),
         );
         await tester.dragFrom(drawStart, const Offset(48, 36));
-        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
 
         expect(controller.selectedImage!.boxCount, countBeforeDraw + 1);
         expect(controller.selectedBox!.width, greaterThan(0));
@@ -646,7 +646,7 @@ void main() {
         find.byKey(const ValueKey('resize-handle-box-1-bottomRight')),
         const Offset(14, 10),
       );
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
       final after = controller.selectedImage!.boxes.single;
       expect(after.x, before.x);

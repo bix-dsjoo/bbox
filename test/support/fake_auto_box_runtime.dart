@@ -14,6 +14,7 @@ class FakeAutoBoxRuntime extends ChangeNotifier implements AutoBoxRuntime {
     ),
     this.detectionError,
     this.detectionCompleter,
+    this.classifyHandler,
     this.warmUpCompleter,
     this.shutdownCompleter,
   }) : _currentState = state;
@@ -35,6 +36,11 @@ class FakeAutoBoxRuntime extends ChangeNotifier implements AutoBoxRuntime {
   DetectionResult detectionResult;
   Object? detectionError;
   Completer<DetectionResult>? detectionCompleter;
+  Future<DetectionResult> Function(
+    AnnotatedImage image,
+    List<BoundingBox> boxes,
+  )?
+  classifyHandler;
   Completer<void>? warmUpCompleter;
   Completer<void>? shutdownCompleter;
 
@@ -87,6 +93,10 @@ class FakeAutoBoxRuntime extends ChangeNotifier implements AutoBoxRuntime {
     List<BoundingBox> boxes,
   ) async {
     classifyCount++;
+    final handler = classifyHandler;
+    if (handler != null) {
+      return handler(image, boxes);
+    }
     return detectionResult;
   }
 

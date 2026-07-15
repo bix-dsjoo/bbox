@@ -417,7 +417,7 @@ void main() {
         find.byKey(const ValueKey('image-canvas')),
         const Offset(80, 60),
       );
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
       expect(controller.selectedBoxId, startsWith('manual-'));
       expect(controller.canConfirmSelectedImage, isFalse);

@@ -184,22 +184,7 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
     final cancellation = Completer<void>();
     _activeCancellation = cancellation;
     try {
-      await warmUp();
-      final generation = _generation;
-      final client = _client;
-      if (client == null) throw _shutdownCancellation();
-      _ensureClientOwner(generation, client);
-      _setState(AutoBoxState.running);
-      final response = await _sendClassification(
-        client,
-        image.sourcePath,
-        boxes,
-        generation,
-      );
-      _ensureClientOwner(generation, client);
-      final result = _parseResult(response, image);
-      _setState(AutoBoxState.ready);
-      return result;
+      return await _classifyOnceWithRecovery(image, boxes);
     } finally {
       if (identical(_activeCancellation, cancellation)) {
         _activeCancellation = null;
@@ -304,6 +289,73 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
         if (!_isCurrentGeneration(generation)) {
           throw _shutdownCancellation();
         }
+        _setState(AutoBoxState.failed);
+        rethrow;
+      }
+    }
+  }
+
+  Future<DetectionResult> _classifyOnceWithRecovery(
+    AnnotatedImage image,
+    List<BoundingBox> boxes,
+  ) async {
+    await warmUp();
+    final generation = _generation;
+    final client = _client;
+    if (client == null) throw _shutdownCancellation();
+    _ensureClientOwner(generation, client);
+    _lastError = null;
+    _setState(AutoBoxState.running);
+
+    try {
+      final response = await _sendClassification(
+        client,
+        image.sourcePath,
+        boxes,
+        generation,
+      );
+      _ensureClientOwner(generation, client);
+      final result = _parseResult(response, image);
+      _setState(AutoBoxState.ready);
+      return result;
+    } catch (error) {
+      if (error is AutoBoxCancelledException) rethrow;
+      if (!_isCurrentGeneration(generation)) throw _shutdownCancellation();
+      if (!_isRetryableWorkerFailure(error)) {
+        _lastError = error;
+        _setState(AutoBoxState.ready);
+        rethrow;
+      }
+
+      try {
+        late final Future<void> restart;
+        restart = _restartClient(generation, client).whenComplete(() {
+          if (identical(_restartFuture, restart)) _restartFuture = null;
+        });
+        _restartFuture = restart;
+        await restart;
+        _ensureCurrentGeneration(generation);
+        final replacement = _client;
+        if (replacement == null) throw _shutdownCancellation();
+        _ensureClientOwner(generation, replacement);
+        _setState(AutoBoxState.running);
+        final response = await _sendClassification(
+          replacement,
+          image.sourcePath,
+          boxes,
+          generation,
+        );
+        _ensureClientOwner(generation, replacement);
+        final result = _parseResult(response, image);
+        _lastError = null;
+        _setState(AutoBoxState.ready);
+        return result;
+      } catch (retryError) {
+        if (!_isCurrentGeneration(generation)) throw _shutdownCancellation();
+        _lastError = retryError;
+        final failedClient = _client;
+        if (failedClient != null) await _killClient(failedClient);
+        if (!_isCurrentGeneration(generation)) throw _shutdownCancellation();
         _setState(AutoBoxState.failed);
         rethrow;
       }
@@ -639,13 +691,16 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
   WorkerStageError _parseStageError(Object? raw) {
     if (raw is! Map<Object?, Object?> ||
         raw['stage'] is! String ||
-        raw['code'] is! String ||
         raw['message'] is! String) {
+      throw WorkerProtocolException('invalid stage error');
+    }
+    final code = raw['code'];
+    if (code != null && code is! String) {
       throw WorkerProtocolException('invalid stage error');
     }
     return WorkerStageError(
       stage: raw['stage'] as String,
-      code: raw['code'] as String,
+      code: code as String? ?? 'stage_failed',
       message: raw['message'] as String,
     );
   }

@@ -85,6 +85,8 @@ class AppController extends ChangeNotifier {
   int? _activeAutoBoxRequestToken;
   Timer? _classificationDebounce;
   int _classificationGeneration = 0;
+  bool _classificationInFlight = false;
+  bool _classificationPending = false;
   final Map<int, String> _pipelineVersionsByImageId = {};
 
   final List<AnnotationProject> _undoStack = [];
@@ -814,9 +816,7 @@ class AppController extends ChangeNotifier {
         box.automation?.pipelineVersion ??
         _pipelineVersionsByImageId[imageId] ??
         '';
-    if (image.contentSha256 == null && resolvedPipelineVersion.isEmpty) {
-      return;
-    }
+    _classificationPending = true;
     _classificationDebounce = Timer(
       const Duration(milliseconds: 250),
       () => unawaited(
@@ -850,98 +850,112 @@ class AppController extends ChangeNotifier {
         projectEpoch != _projectEpoch) {
       return;
     }
-    final image = _imageById(imageId);
-    final box = _boxById(image, boxId);
-    if (image == null ||
-        box == null ||
-        !_sameGeometry(box, x, y, width, height)) {
-      return;
-    }
-
-    final imageHash = image.contentSha256;
-    final cacheKey = imageHash == null || pipelineVersion.isEmpty
-        ? null
-        : BoxLabelCacheKey(
-            imageSha256: imageHash,
-            x: x,
-            y: y,
-            width: width,
-            height: height,
-            pipelineVersion: pipelineVersion,
-          );
-    final cached = cacheKey == null ? null : _boxLabelCache.getEntry(cacheKey);
-    if (cached != null) {
-      _applyClassificationDecision(
-        image: image,
-        box: cached.applyTo(box),
-        generation: generation,
-        projectEpoch: projectEpoch,
-        x: x,
-        y: y,
-        width: width,
-        height: height,
-      );
-      return;
-    }
-
+    if (_classificationInFlight) return;
+    _classificationPending = false;
+    _classificationInFlight = true;
     try {
-      final result = await _autoBoxRuntime.classifyBoxes(image, [box]);
-      if (generation != _classificationGeneration ||
-          projectEpoch != _projectEpoch) {
+      final image = _imageById(imageId);
+      final box = _boxById(image, boxId);
+      if (image == null ||
+          box == null ||
+          !_sameGeometry(box, x, y, width, height)) {
         return;
       }
-      final currentImage = _imageById(imageId);
-      final currentBox = _boxById(currentImage, boxId);
-      if (currentImage == null ||
-          currentBox == null ||
-          !_sameGeometry(currentBox, x, y, width, height) ||
-          result.boxes.isEmpty) {
-        return;
-      }
-      final responseBox = result.boxes.firstWhere(
-        (candidate) => candidate.id == boxId,
-        orElse: () => result.boxes.single,
-      );
-      final project = _project!;
-      final normalized = _normalizeDetectionLabelIds(project, [
-        responseBox,
-      ]).single.copyWith(id: boxId, x: x, y: y, width: width, height: height);
-      final resultPipeline = result.pipelineVersion ?? pipelineVersion;
-      if (resultPipeline.isNotEmpty) {
-        _pipelineVersionsByImageId[imageId] = resultPipeline;
-      }
-      final resultHash = result.imageSha256 ?? currentImage.contentSha256;
-      if (currentImage.contentSha256 != null &&
-          resultHash != null &&
-          currentImage.contentSha256 != resultHash) {
-        _boxLabelCache.invalidateImage(currentImage.contentSha256!);
-      }
-      final resultKey = resultHash == null || resultPipeline.isEmpty
+
+      final imageHash = image.contentSha256;
+      final cacheKey = imageHash == null || pipelineVersion.isEmpty
           ? null
           : BoxLabelCacheKey(
-              imageSha256: resultHash,
+              imageSha256: imageHash,
               x: x,
               y: y,
               width: width,
               height: height,
-              pipelineVersion: resultPipeline,
+              pipelineVersion: pipelineVersion,
             );
-      if (resultKey != null &&
-          (normalized.isAutoLabeled || normalized.requiresLabelReview)) {
-        _boxLabelCache.putBox(resultKey, normalized);
+      final cached = cacheKey == null
+          ? null
+          : _boxLabelCache.getEntry(cacheKey);
+      if (cached != null) {
+        _applyClassificationDecision(
+          image: image,
+          box: cached.applyTo(box),
+          generation: generation,
+          projectEpoch: projectEpoch,
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+        );
+        return;
       }
-      _applyClassificationDecision(
-        image: currentImage.copyWith(contentSha256: resultHash),
-        box: normalized,
-        generation: generation,
-        projectEpoch: projectEpoch,
-        x: x,
-        y: y,
-        width: width,
-        height: height,
-      );
-    } catch (_) {
-      // A failed refresh leaves the box as an explicit gray proposal.
+
+      try {
+        final result = await _autoBoxRuntime.classifyBoxes(image, [box]);
+        if (generation != _classificationGeneration ||
+            projectEpoch != _projectEpoch) {
+          return;
+        }
+        final currentImage = _imageById(imageId);
+        final currentBox = _boxById(currentImage, boxId);
+        if (currentImage == null ||
+            currentBox == null ||
+            !_sameGeometry(currentBox, x, y, width, height) ||
+            currentBox.status != BoxStatus.proposal ||
+            currentBox.labelId != null ||
+            result.boxes.isEmpty) {
+          return;
+        }
+        final responseBox = result.boxes.firstWhere(
+          (candidate) => candidate.id == boxId,
+          orElse: () => result.boxes.single,
+        );
+        final project = _project!;
+        final normalized = _normalizeDetectionLabelIds(project, [
+          responseBox,
+        ]).single.copyWith(id: boxId, x: x, y: y, width: width, height: height);
+        final resultPipeline = result.pipelineVersion ?? pipelineVersion;
+        if (resultPipeline.isNotEmpty) {
+          _pipelineVersionsByImageId[imageId] = resultPipeline;
+        }
+        final resultHash = result.imageSha256 ?? currentImage.contentSha256;
+        if (currentImage.contentSha256 != null &&
+            resultHash != null &&
+            currentImage.contentSha256 != resultHash) {
+          _boxLabelCache.invalidateImage(currentImage.contentSha256!);
+        }
+        final resultKey = resultHash == null || resultPipeline.isEmpty
+            ? null
+            : BoxLabelCacheKey(
+                imageSha256: resultHash,
+                x: x,
+                y: y,
+                width: width,
+                height: height,
+                pipelineVersion: resultPipeline,
+              );
+        if (resultKey != null &&
+            (normalized.isAutoLabeled || normalized.requiresLabelReview)) {
+          _boxLabelCache.putBox(resultKey, normalized);
+        }
+        _applyClassificationDecision(
+          image: currentImage.copyWith(contentSha256: resultHash),
+          box: normalized,
+          generation: generation,
+          projectEpoch: projectEpoch,
+          x: x,
+          y: y,
+          width: width,
+          height: height,
+        );
+      } catch (_) {
+        // A failed refresh leaves the box as an explicit gray proposal.
+      }
+    } finally {
+      _classificationInFlight = false;
+      if (_classificationPending && projectEpoch == _projectEpoch) {
+        scheduleSelectedBoxClassification();
+      }
     }
   }
 
@@ -1113,6 +1127,7 @@ class AppController extends ChangeNotifier {
     }
     _classificationDebounce?.cancel();
     _classificationGeneration++;
+    _classificationPending = false;
     _redoStack.add(_project!);
     _project = _undoStack.removeLast();
     _repairSelection();
@@ -1125,6 +1140,7 @@ class AppController extends ChangeNotifier {
     }
     _classificationDebounce?.cancel();
     _classificationGeneration++;
+    _classificationPending = false;
     _undoStack.add(_project!);
     _project = _redoStack.removeLast();
     _repairSelection();
@@ -1570,6 +1586,7 @@ class AppController extends ChangeNotifier {
   void dispose() {
     _classificationDebounce?.cancel();
     _classificationGeneration++;
+    _classificationPending = false;
     _autoBoxRuntime.removeListener(_handleAutoBoxRuntimeChanged);
     unawaited(_autoBoxRuntime.shutdown());
     super.dispose();

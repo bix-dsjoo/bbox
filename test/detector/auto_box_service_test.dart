@@ -664,7 +664,6 @@ void main() {
           ..['stageErrors'] = <Object?>[
             <String, Object?>{
               'stage': 'verifier',
-              'code': 'unavailable',
               'message': 'verifier unavailable',
             },
           ];
@@ -687,6 +686,43 @@ void main() {
         expect(client.classifyCount, 1);
         expect(result.boxes.single.id, 'manual-1');
         expect(result.stageErrors.single.stage, 'verifier');
+        expect(result.stageErrors.single.code, 'stage_failed');
+      },
+    );
+
+    test(
+      'classification protocol failure restarts once and recovers',
+      () async {
+        final failedClient = FakeBreadWorkerClient(
+          responses: [WorkerProtocolException('bad classify response')],
+        );
+        final replacementClient = FakeBreadWorkerClient(
+          responses: [reviewWorkerResponse],
+        );
+        final clients = Queue<FakeBreadWorkerClient>.of([
+          failedClient,
+          replacementClient,
+        ]);
+        final service = AutoBoxService(
+          createClient: clients.removeFirst,
+          openImage: (_) async => testPayload(),
+        );
+
+        final result = await service.classifyBoxes(testImage, const [
+          BoundingBox(
+            id: 'manual-1',
+            x: 10,
+            y: 5,
+            width: 20,
+            height: 30,
+            status: BoxStatus.proposal,
+          ),
+        ]);
+
+        expect(result.boxes.single.id, 'manual-1');
+        expect(failedClient.killCount, 1);
+        expect(replacementClient.classifyCount, 1);
+        expect(service.state, AutoBoxState.ready);
       },
     );
 

@@ -457,7 +457,7 @@ void main() {
       final beforeX = before.x;
       final beforeY = before.y;
       await tester.dragFrom(interactionPoint, const Offset(14, 10));
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
 
       final after = controller.selectedImage!.boxes.single;
       expect(after.x, greaterThan(beforeX));
