@@ -44,6 +44,8 @@ class _StartScreenState extends State<StartScreen> {
     return AnimatedBuilder(
       animation: widget.controller,
       builder: (context, _) {
+        final isBusy =
+            widget.controller.projectActivity != ProjectActivity.idle;
         return Scaffold(
           backgroundColor: WorkbenchPalette.appBackground,
           body: SafeArea(
@@ -80,11 +82,14 @@ class _StartScreenState extends State<StartScreen> {
                             child: TextField(
                               key: const ValueKey('new-project-name'),
                               controller: _nameController,
+                              enabled: !isBusy,
                               decoration: const InputDecoration(
                                 labelText: ProjectHomeCopy.projectName,
                                 border: OutlineInputBorder(),
                               ),
-                              onSubmitted: (_) => _createProject(),
+                              onSubmitted: isBusy
+                                  ? null
+                                  : (_) => _createProject(),
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -92,7 +97,7 @@ class _StartScreenState extends State<StartScreen> {
                             key: const ValueKey('create-project-forui'),
                             child: FilledButton.icon(
                               key: const ValueKey('create-project'),
-                              onPressed: _createProject,
+                              onPressed: isBusy ? null : _createProject,
                               icon: const Icon(Icons.add, size: 18),
                               label: const Text(ProjectHomeCopy.createProject),
                             ),
@@ -106,7 +111,7 @@ class _StartScreenState extends State<StartScreen> {
                           message: ProjectHomeCopy.importProjectFileHint,
                           child: OutlinedButton.icon(
                             key: const ValueKey('import-project-file'),
-                            onPressed: _importProjectFile,
+                            onPressed: isBusy ? null : _importProjectFile,
                             icon: const Icon(
                               Icons.file_open_outlined,
                               size: 18,
@@ -182,6 +187,7 @@ class _StartScreenState extends State<StartScreen> {
                                     PopupMenuButton<String>(
                                       key: ValueKey('project-menu-${entry.id}'),
                                       tooltip: ProjectHomeCopy.projectActions,
+                                      enabled: !isBusy,
                                       onSelected: (value) {
                                         if (value == 'rename') {
                                           _renameProject(entry.id, entry.name);
@@ -212,7 +218,10 @@ class _StartScreenState extends State<StartScreen> {
                                     ),
                                   ],
                                 ),
-                                onTap: () => _openLibraryProject(entry.id),
+                                enabled: !isBusy,
+                                onTap: isBusy
+                                    ? null
+                                    : () => _openLibraryProject(entry.id),
                               );
                             },
                           ),

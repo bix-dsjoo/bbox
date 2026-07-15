@@ -838,6 +838,40 @@ void main() {
       expect(controller.projectActivity, ProjectActivity.idle);
       expect(controller.lastUserMessage, contains('Could not check source'));
     });
+
+    test(
+      'a no-project relink failure does not poison the next relink',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_relink_preflight',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final replacementPath = p.join(
+          tempDir.path,
+          'replacement',
+          'bread.png',
+        );
+        await _writePng(replacementPath, width: 32, height: 24);
+        final controller = AppController();
+
+        await expectLater(
+          controller.relinkSourceFiles(const []),
+          throwsA(isA<StateError>()),
+        );
+        controller.loadProject(
+          _portableProject(
+            sourcePaths: [p.join(tempDir.path, 'old', 'bread.png')],
+          ),
+        );
+        await controller.refreshSourceAvailability();
+
+        final result = await controller.relinkSourceFiles([replacementPath]);
+
+        expect(result.matchedCount, 1);
+        expect(controller.project!.images.single.sourcePath, replacementPath);
+        expect(controller.projectActivity, ProjectActivity.idle);
+      },
+    );
   });
 
   group('AppController box editing', () {

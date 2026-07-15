@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:bbox_labeler/ui/app_controller.dart';
@@ -144,6 +145,78 @@ void main() {
       expect(find.textContaining('프로젝트 작업을 완료하지 못했습니다'), findsNothing);
     });
 
+    testWidgets('busy import disables every conflicting project-home action', (
+      tester,
+    ) async {
+      await library.createProject('Existing');
+      final snapshotService = _BlockingHomeSnapshotService();
+      final busyController = AppController(
+        projectLibrary: library,
+        projectSnapshotService: snapshotService,
+        autoBoxRuntime: FakeAutoBoxRuntime(),
+      );
+      addTearDown(busyController.dispose);
+
+      await tester.pumpWidget(
+        BboxApp(
+          controller: busyController,
+          projectTransferPicker: const FakeProjectTransferPicker(
+            importPath: 'blocked.bbox.json',
+          ),
+        ),
+      );
+      await tester.pump();
+      await _pumpRealAsync(tester);
+
+      await tester.tap(find.byKey(const ValueKey('import-project-file')));
+      await tester.pump();
+      await snapshotService.started.future;
+      await tester.pump();
+
+      expect(busyController.projectActivity, ProjectActivity.importing);
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(const ValueKey('create-project')))
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.byKey(const ValueKey('import-project-file')),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<ListTile>(
+              find.byKey(const ValueKey('project-entry-home-project')),
+            )
+            .onTap,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<PopupMenuButton<String>>(
+              find.byKey(const ValueKey('project-menu-home-project')),
+            )
+            .enabled,
+        isFalse,
+      );
+
+      snapshotService.result.complete(
+        AnnotationProject.empty(
+          name: 'Imported',
+        ).copyWith(status: ProjectStatus.ready),
+      );
+      await _pumpRealAsync(tester);
+      await tester.pump();
+
+      expect(busyController.projectActivity, ProjectActivity.idle);
+      expect(busyController.project!.name, 'Imported');
+    });
+
     testWidgets('returning launch lists and opens saved projects', (
       tester,
     ) async {
@@ -274,6 +347,17 @@ void main() {
       },
     );
   });
+}
+
+class _BlockingHomeSnapshotService extends ProjectSnapshotService {
+  final started = Completer<void>();
+  final result = Completer<AnnotationProject>();
+
+  @override
+  Future<AnnotationProject> readSnapshot(String path) {
+    started.complete();
+    return result.future;
+  }
 }
 
 Future<void> _pumpRealAsync(WidgetTester tester) async {

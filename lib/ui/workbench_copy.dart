@@ -129,7 +129,7 @@ class WorkbenchCopy {
   static const cancelAutoBoxes = '자동 박스 취소';
   static const automaticLabel = '자동 라벨';
   static const reviewRequired = '검토 필요';
-  static const chooseReviewCandidate = '추천 라벨을 선택하고 Enter를 누르세요';
+  static const chooseReviewCandidate = '추천 라벨을 선택한 뒤 Enter를 누르세요';
   static const applyReviewCandidate = '선택한 라벨 적용 · Enter';
   static const noReviewCandidates = '추천 결과 없음';
   static const noReviewCandidatesHint = '빠른 라벨 버튼 또는 단축키로 라벨을 선택하세요.';
@@ -191,7 +191,7 @@ class WorkbenchCopy {
   static String projectFileSaved(String path) => '프로젝트 파일을 저장했습니다: $path';
 
   static String projectFileSaveFailed(Object error) =>
-      '프로젝트 파일을 저장하지 못했습니다. 경로와 권한을 확인한 뒤 다시 시도하세요: $error';
+      '프로젝트 파일을 저장하지 못했습니다. 경로와 권한을 확인한 뒤 다시 시도하세요. $error';
 
   static String exportAutoLabeledBoxes(int count) => '자동 라벨 박스: $count';
 

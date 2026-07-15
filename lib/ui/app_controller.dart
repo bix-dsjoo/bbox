@@ -518,6 +518,8 @@ class AppController extends ChangeNotifier {
 
   Future<void> importProjectSnapshot(String sourcePath) async {
     final requestEpoch = _projectEpoch;
+    _projectActivity = ProjectActivity.importing;
+    notifyListeners();
     try {
       await _waitForAutoSaveIdle();
       if (_isDisposed || requestEpoch != _projectEpoch) return;
@@ -545,6 +547,13 @@ class AppController extends ChangeNotifier {
           'Could not import the project snapshot. Verify the file and choose a writable project library, then try again.';
       notifyListeners();
       rethrow;
+    } finally {
+      if (!_isDisposed &&
+          requestEpoch == _projectEpoch &&
+          _projectActivity == ProjectActivity.importing) {
+        _projectActivity = ProjectActivity.idle;
+        notifyListeners();
+      }
     }
   }
 
@@ -696,13 +705,13 @@ class AppController extends ChangeNotifier {
         'Source reconnection is already in progress. Wait for it to finish before trying again.',
       );
     }
-    final relinkOwner = Object();
-    _sourceRelinkInFlight = relinkOwner;
     final projectEpoch = _projectEpoch;
     final missingImages = requestedImages ?? _missingImages();
     final originalPaths = {
       for (final image in missingImages) image.id: image.sourcePath,
     };
+    final relinkOwner = Object();
+    _sourceRelinkInFlight = relinkOwner;
     _projectActivity = ProjectActivity.validating;
     notifyListeners();
     try {

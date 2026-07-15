@@ -471,6 +471,34 @@ void main() {
     );
 
     test(
+      'snapshot import exposes importing activity until decoding finishes',
+      () async {
+        final snapshotService = _BlockingReadSnapshotService();
+        final importingController = AppController(
+          projectLibrary: library,
+          projectSnapshotService: snapshotService,
+        );
+        addTearDown(importingController.dispose);
+
+        final import = importingController.importProjectSnapshot(
+          'blocked.json',
+        );
+        await snapshotService.started.future;
+
+        expect(importingController.projectActivity, ProjectActivity.importing);
+        snapshotService.result.complete(
+          AnnotationProject.empty(
+            name: 'Imported',
+          ).copyWith(status: ProjectStatus.ready),
+        );
+        await import;
+
+        expect(importingController.projectActivity, ProjectActivity.idle);
+        expect(importingController.project!.name, 'Imported');
+      },
+    );
+
+    test(
       'successful import reports availability refresh failure as warning',
       () async {
         final transferPath = p.join(tempDir.path, 'warning-import.bbox.json');
