@@ -254,7 +254,7 @@ class ProjectSnapshotService {
     });
     final labels = _requiredList(raw, 'labels', r'$');
     for (var labelIndex = 0; labelIndex < labels.length; labelIndex++) {
-      final path = r'$.labels[' + '$labelIndex]';
+      final path = '\$.labels[$labelIndex]';
       final label = _requiredObject(labels[labelIndex], path);
       _required<int>(label, 'id', path);
       _required<String>(label, 'name', path);
@@ -264,7 +264,7 @@ class ProjectSnapshotService {
     }
     final images = _requiredList(raw, 'images', r'$');
     for (var imageIndex = 0; imageIndex < images.length; imageIndex++) {
-      final path = r'$.images[' + '$imageIndex]';
+      final path = '\$.images[$imageIndex]';
       final image = _requiredObject(images[imageIndex], path);
       _required<int>(image, 'id', path);
       _required<String>(image, 'sourcePath', path);

@@ -82,10 +82,9 @@ class ProjectLibrary {
     required this.rootPath,
     Clock? clock,
     ProjectIdGenerator? idGenerator,
-    ProjectLibraryOperationHook? beforeOperation,
+    this.beforeOperation,
   }) : _clock = clock ?? DateTime.now,
-       _idGenerator = idGenerator ?? _defaultProjectId,
-       _beforeOperation = beforeOperation;
+       _idGenerator = idGenerator ?? _defaultProjectId;
 
   factory ProjectLibrary.appData({Map<String, String>? environment}) {
     final appData = environment?['APPDATA'] ?? Platform.environment['APPDATA'];
@@ -100,7 +99,7 @@ class ProjectLibrary {
   final String rootPath;
   final Clock _clock;
   final ProjectIdGenerator _idGenerator;
-  final ProjectLibraryOperationHook? _beforeOperation;
+  final ProjectLibraryOperationHook? beforeOperation;
   Future<void> _operationTail = Future<void>.value();
 
   String get projectsRootPath => p.join(rootPath, 'projects');
@@ -382,7 +381,7 @@ class ProjectLibrary {
 
   Future<T> _serialize<T>(String? operation, Future<T> Function() action) {
     final result = _operationTail.then((_) async {
-      if (operation != null) await _beforeOperation?.call(operation);
+      if (operation != null) await beforeOperation?.call(operation);
       return action();
     });
     _operationTail = result.then<void>((_) {}, onError: (_, _) {});
