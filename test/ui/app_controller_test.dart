@@ -523,6 +523,67 @@ void main() {
       );
     });
 
+    test(
+      'relink rebases only histories with the same image id and source path',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_relink_reused_id',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final sourceA = p.join(tempDir.path, 'source-a', 'a.png');
+        final sourceB = p.join(tempDir.path, 'source-b', 'b.png');
+        final replacementB = p.join(tempDir.path, 'replacement-b', 'b.png');
+        await _writePng(sourceB, width: 32, height: 24);
+        await _writePng(replacementB, width: 32, height: 24);
+        final controller = AppController()
+          ..loadProject(_portableProject(sourcePaths: [sourceA]));
+
+        controller.addBox(x: 8, y: 8, width: 4, height: 4);
+        controller.removeImageFromProject(1);
+        await controller.addImageFiles([sourceB]);
+        expect(controller.project!.images.single.id, 1);
+        controller.addBox(x: 3, y: 3, width: 5, height: 5);
+        await File(sourceB).delete();
+        await controller.refreshSourceAvailability();
+        expect(controller.sourceAvailability[1], SourceAvailability.missing);
+
+        await controller.relinkSourceFiles([replacementB]);
+
+        controller.undo();
+        await _waitForAvailability(controller, 1, SourceAvailability.available);
+        expect(controller.project!.images.single.sourcePath, replacementB);
+        expect(controller.project!.images.single.boxes, isEmpty);
+
+        controller.undo();
+        expect(controller.project!.images, isEmpty);
+
+        controller.undo();
+        expect(controller.project!.images.single.sourcePath, sourceA);
+        expect(controller.project!.images.single.boxes, hasLength(2));
+
+        controller.undo();
+        expect(controller.project!.images.single.sourcePath, sourceA);
+        expect(controller.project!.images.single.boxes, hasLength(1));
+
+        controller.redo();
+        expect(controller.project!.images.single.sourcePath, sourceA);
+        expect(controller.project!.images.single.boxes, hasLength(2));
+
+        controller.redo();
+        expect(controller.project!.images, isEmpty);
+
+        controller.redo();
+        await _waitForAvailability(controller, 1, SourceAvailability.available);
+        expect(controller.project!.images.single.sourcePath, replacementB);
+        expect(controller.project!.images.single.boxes, isEmpty);
+
+        controller.redo();
+        await _waitForAvailability(controller, 1, SourceAvailability.available);
+        expect(controller.project!.images.single.sourcePath, replacementB);
+        expect(controller.project!.images.single.boxes, hasLength(1));
+      },
+    );
+
     test('relink invalidates in-flight detection for the old source', () async {
       final tempDir = await Directory.systemTemp.createTemp(
         'bbox_controller_relink_detection',

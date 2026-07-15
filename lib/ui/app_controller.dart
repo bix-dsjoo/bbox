@@ -668,11 +668,13 @@ class AppController extends ChangeNotifier {
         final project = _requireProject();
         final appliedPaths = <int, String>{};
         final appliedImportedFrom = <int, String>{};
+        final appliedOriginalPaths = <int, String>{};
         for (final image in project.images) {
           final matchedPath = result.matchedPaths[image.id];
           if (matchedPath != null &&
               originalPaths[image.id] == image.sourcePath) {
             appliedPaths[image.id] = matchedPath;
+            appliedOriginalPaths[image.id] = image.sourcePath;
             final importedFrom = result.matchedImportedFrom[image.id];
             if (importedFrom != null) {
               appliedImportedFrom[image.id] = importedFrom;
@@ -685,12 +687,14 @@ class AppController extends ChangeNotifier {
             project,
             appliedPaths,
             appliedImportedFrom,
+            appliedOriginalPaths,
           );
           for (var index = 0; index < _undoStack.length; index++) {
             _undoStack[index] = _projectWithRelinkedSources(
               _undoStack[index],
               appliedPaths,
               appliedImportedFrom,
+              appliedOriginalPaths,
             );
           }
           for (var index = 0; index < _redoStack.length; index++) {
@@ -698,6 +702,7 @@ class AppController extends ChangeNotifier {
               _redoStack[index],
               appliedPaths,
               appliedImportedFrom,
+              appliedOriginalPaths,
             );
           }
           _classificationDebounce?.cancel();
@@ -757,11 +762,13 @@ class AppController extends ChangeNotifier {
     AnnotationProject project,
     Map<int, String> matchedPaths,
     Map<int, String> matchedImportedFrom,
+    Map<int, String> originalPaths,
   ) {
     return project.copyWith(
       images: [
         for (final image in project.images)
-          if (matchedPaths.containsKey(image.id))
+          if (matchedPaths.containsKey(image.id) &&
+              originalPaths[image.id] == image.sourcePath)
             image.copyWith(
               sourcePath: matchedPaths[image.id],
               importedFrom: matchedImportedFrom[image.id],
