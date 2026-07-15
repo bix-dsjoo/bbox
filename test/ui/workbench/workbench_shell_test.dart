@@ -590,5 +590,72 @@ void main() {
         expect(find.byType(SnackBar), findsNothing);
       },
     );
+
+    testWidgets(
+      'reconnect banner allows only one action while the picker is pending',
+      (tester) async {
+        const replacementPath = 'replacement/bread.jpg';
+        const missingPath = 'missing/bread.jpg';
+        final relinkService = ImmediateRelinkSourceService(
+          replacementPath: replacementPath,
+        );
+        final controller = AppController(sourceRelinkService: relinkService)
+          ..loadProject(
+            project().copyWith(
+              images: [
+                project().images.first.copyWith(
+                  sourcePath: missingPath,
+                  displayName: 'bread.jpg',
+                  status: ImageStatus.confirmed,
+                ),
+              ],
+            ),
+          );
+        addTearDown(controller.dispose);
+        await controller.refreshSourceAvailability();
+        final picker = DelayedImageImportPicker();
+
+        await tester.pumpWidget(app(controller, imageImportPicker: picker));
+
+        await tester.tap(find.byKey(const ValueKey('relink-source-files')));
+        await tester.pump();
+
+        expect(picker.fileCalls, 1);
+        expect(
+          tester
+              .widget<OutlinedButton>(
+                find.byKey(const ValueKey('relink-source-files')),
+              )
+              .onPressed,
+          isNull,
+        );
+        expect(
+          tester
+              .widget<OutlinedButton>(
+                find.byKey(const ValueKey('relink-source-folder')),
+              )
+              .onPressed,
+          isNull,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('relink-source-files')));
+        await tester.tap(find.byKey(const ValueKey('relink-source-folder')));
+        await tester.pump();
+
+        expect(picker.fileCalls, 1);
+        expect(picker.folderCalls, 0);
+
+        picker.fileResult.complete([replacementPath]);
+        await tester.pump();
+        await tester.pump();
+
+        expect(picker.fileCalls, 1);
+        expect(picker.folderCalls, 0);
+        expect(relinkService.fileRelinkCalls, 1);
+        expect(relinkService.folderRelinkCalls, 0);
+        expect(controller.project!.images.single.status, ImageStatus.confirmed);
+        expect(find.text('1개 연결 · 0개 미해결 · 0개 중복 후보'), findsOneWidget);
+      },
+    );
   });
 }

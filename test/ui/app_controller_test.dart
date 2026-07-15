@@ -407,6 +407,59 @@ void main() {
     );
 
     test(
+      'concurrent relink is rejected without releasing the first activity',
+      () async {
+        final service = _DelayedRelinkSourceRelinkService();
+        final controller = AppController(sourceRelinkService: service)
+          ..loadProject(_portableProject(sourcePaths: ['missing/bread.png']));
+        addTearDown(controller.dispose);
+        await controller.refreshSourceAvailability();
+
+        final first = controller.relinkSourceFiles(['replacement/bread.png']);
+        await service.relinkStarted.future;
+
+        expect(controller.projectActivity, ProjectActivity.validating);
+        Object? secondError;
+        final second = controller.relinkSourceFolder('replacement').catchError((
+          Object error,
+        ) {
+          secondError = error;
+          return const SourceRelinkResult(
+            matchedPaths: {},
+            matchedImportedFrom: {},
+            unresolvedImageIds: {},
+            ambiguousImageIds: {},
+          );
+        });
+        await Future<void>.delayed(Duration.zero);
+        final activityWhileFirstPending = controller.projectActivity;
+
+        service.completeRelink(
+          const SourceRelinkResult(
+            matchedPaths: {},
+            matchedImportedFrom: {},
+            unresolvedImageIds: {1},
+            ambiguousImageIds: {},
+          ),
+        );
+        await Future.wait([first, second]);
+
+        expect(service.fileRelinkCalls, 1);
+        expect(service.folderRelinkCalls, 0);
+        expect(activityWhileFirstPending, ProjectActivity.validating);
+        expect(
+          secondError,
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('already in progress'),
+          ),
+        );
+        expect(controller.projectActivity, ProjectActivity.idle);
+      },
+    );
+
+    test(
       'undo and redo refresh source availability for restored paths',
       () async {
         final tempDir = await Directory.systemTemp.createTemp(
@@ -1599,6 +1652,41 @@ class _DelayedInspectSourceRelinkService extends SourceRelinkService {
 
   void complete(Map<int, SourceAvailability> availability) {
     _completion.complete(availability);
+  }
+}
+
+class _DelayedRelinkSourceRelinkService extends SourceRelinkService {
+  final relinkStarted = Completer<void>();
+  final _relinkCompletion = Completer<SourceRelinkResult>();
+  int fileRelinkCalls = 0;
+  int folderRelinkCalls = 0;
+
+  @override
+  Future<Map<int, SourceAvailability>> inspectSources(
+    Iterable<AnnotatedImage> images,
+  ) async => {for (final image in images) image.id: SourceAvailability.missing};
+
+  @override
+  Future<SourceRelinkResult> relinkFiles({
+    required List<AnnotatedImage> missingImages,
+    required List<String> candidatePaths,
+  }) {
+    fileRelinkCalls += 1;
+    if (!relinkStarted.isCompleted) relinkStarted.complete();
+    return _relinkCompletion.future;
+  }
+
+  @override
+  Future<SourceRelinkResult> relinkFolder({
+    required List<AnnotatedImage> missingImages,
+    required String folderPath,
+  }) {
+    folderRelinkCalls += 1;
+    return _relinkCompletion.future;
+  }
+
+  void completeRelink(SourceRelinkResult result) {
+    _relinkCompletion.complete(result);
   }
 }
 

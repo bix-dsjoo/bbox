@@ -111,6 +111,7 @@ class AppController extends ChangeNotifier {
   final Map<int, String> _pipelineVersionsByImageId = {};
   Map<int, SourceAvailability> _sourceAvailability = const {};
   int _sourceRefreshGeneration = 0;
+  Object? _sourceRelinkInFlight;
   final Map<int, int> _sourceRevisionsByImageId = {};
   int _nextSourceRevision = 0;
   bool _isDisposed = false;
@@ -669,6 +670,13 @@ class AppController extends ChangeNotifier {
     operation, {
     List<AnnotatedImage>? requestedImages,
   }) async {
+    if (_sourceRelinkInFlight != null) {
+      throw StateError(
+        'Source reconnection is already in progress. Wait for it to finish before trying again.',
+      );
+    }
+    final relinkOwner = Object();
+    _sourceRelinkInFlight = relinkOwner;
     final projectEpoch = _projectEpoch;
     final missingImages = requestedImages ?? _missingImages();
     final originalPaths = {
@@ -751,11 +759,14 @@ class AppController extends ChangeNotifier {
       }
       rethrow;
     } finally {
-      if (!_isDisposed &&
-          projectEpoch == _projectEpoch &&
-          _projectActivity == ProjectActivity.validating) {
-        _projectActivity = ProjectActivity.idle;
-        notifyListeners();
+      if (identical(_sourceRelinkInFlight, relinkOwner)) {
+        _sourceRelinkInFlight = null;
+        if (!_isDisposed &&
+            projectEpoch == _projectEpoch &&
+            _projectActivity == ProjectActivity.validating) {
+          _projectActivity = ProjectActivity.idle;
+          notifyListeners();
+        }
       }
     }
   }

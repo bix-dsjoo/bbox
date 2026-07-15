@@ -5,6 +5,7 @@ export 'dart:ui' show Tristate;
 export 'package:bbox_labeler/annotation/default_labels.dart';
 export 'package:bbox_labeler/annotation/models.dart';
 export 'package:bbox_labeler/detector/detector.dart';
+export 'package:bbox_labeler/project/source_relink_service.dart';
 export 'package:bbox_labeler/ui/app_controller.dart';
 export 'package:bbox_labeler/ui/app_theme.dart';
 export 'package:bbox_labeler/ui/coco_export_destination_picker.dart';
@@ -16,9 +17,11 @@ export 'package:flutter/foundation.dart';
 export 'package:flutter/gestures.dart';
 export 'package:flutter/semantics.dart';
 export 'package:flutter/services.dart';
+import 'dart:async';
 import 'dart:io';
 import 'package:bbox_labeler/annotation/default_labels.dart';
 import 'package:bbox_labeler/annotation/models.dart';
+import 'package:bbox_labeler/project/source_relink_service.dart';
 import 'package:bbox_labeler/ui/app_controller.dart';
 import 'package:bbox_labeler/ui/coco_export_destination_picker.dart';
 import 'package:bbox_labeler/ui/image_import_picker.dart';
@@ -112,6 +115,76 @@ class FakeImageImportPicker extends ImageImportPicker {
   Future<List<String>> pickImageFiles() {
     onPickFiles?.call();
     return SynchronousFuture(filePaths);
+  }
+}
+
+class DelayedImageImportPicker extends ImageImportPicker {
+  final fileResult = Completer<List<String>>();
+  final folderResult = Completer<String?>();
+  int fileCalls = 0;
+  int folderCalls = 0;
+
+  @override
+  Future<String?> pickImageFolder() {
+    folderCalls += 1;
+    return folderResult.future;
+  }
+
+  @override
+  Future<List<String>> pickImageFiles() {
+    fileCalls += 1;
+    return fileResult.future;
+  }
+}
+
+class ImmediateRelinkSourceService extends SourceRelinkService {
+  ImmediateRelinkSourceService({required this.replacementPath});
+
+  final String replacementPath;
+  int fileRelinkCalls = 0;
+  int folderRelinkCalls = 0;
+
+  @override
+  Future<Map<int, SourceAvailability>> inspectSources(
+    Iterable<AnnotatedImage> images,
+  ) => SynchronousFuture({
+    for (final image in images)
+      image.id: image.sourcePath == replacementPath
+          ? SourceAvailability.available
+          : SourceAvailability.missing,
+  });
+
+  @override
+  Future<SourceRelinkResult> relinkFiles({
+    required List<AnnotatedImage> missingImages,
+    required List<String> candidatePaths,
+  }) {
+    fileRelinkCalls += 1;
+    final image = missingImages.single;
+    return SynchronousFuture(
+      SourceRelinkResult(
+        matchedPaths: {image.id: replacementPath},
+        matchedImportedFrom: {image.id: File(replacementPath).parent.path},
+        unresolvedImageIds: const {},
+        ambiguousImageIds: const {},
+      ),
+    );
+  }
+
+  @override
+  Future<SourceRelinkResult> relinkFolder({
+    required List<AnnotatedImage> missingImages,
+    required String folderPath,
+  }) {
+    folderRelinkCalls += 1;
+    return SynchronousFuture(
+      const SourceRelinkResult(
+        matchedPaths: {},
+        matchedImportedFrom: {},
+        unresolvedImageIds: {},
+        ambiguousImageIds: {},
+      ),
+    );
   }
 }
 

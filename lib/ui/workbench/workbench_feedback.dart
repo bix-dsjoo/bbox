@@ -1,6 +1,6 @@
 part of 'workbench_screen.dart';
 
-class _MissingSourceBanner extends StatelessWidget {
+class _MissingSourceBanner extends StatefulWidget {
   const _MissingSourceBanner({
     required this.count,
     required this.busy,
@@ -10,12 +10,20 @@ class _MissingSourceBanner extends StatelessWidget {
 
   final int count;
   final bool busy;
-  final VoidCallback onRelinkFiles;
-  final VoidCallback onRelinkFolder;
+  final Future<void> Function() onRelinkFiles;
+  final Future<void> Function() onRelinkFolder;
+
+  @override
+  State<_MissingSourceBanner> createState() => _MissingSourceBannerState();
+}
+
+class _MissingSourceBannerState extends State<_MissingSourceBanner> {
+  bool _actionInFlight = false;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final actionsDisabled = widget.busy || _actionInFlight;
     return Semantics(
       container: true,
       liveRegion: true,
@@ -43,7 +51,7 @@ class _MissingSourceBanner extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    WorkbenchCopy.missingSourceCount(count),
+                    WorkbenchCopy.missingSourceCount(widget.count),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
@@ -67,7 +75,9 @@ class _MissingSourceBanner extends StatelessWidget {
               message: WorkbenchCopy.relinkFiles,
               child: OutlinedButton.icon(
                 key: const ValueKey('relink-source-files'),
-                onPressed: busy ? null : onRelinkFiles,
+                onPressed: actionsDisabled
+                    ? null
+                    : () => _runAction(widget.onRelinkFiles),
                 icon: const Icon(Icons.insert_drive_file_outlined, size: 18),
                 label: const Text(WorkbenchCopy.relinkFiles),
               ),
@@ -77,7 +87,9 @@ class _MissingSourceBanner extends StatelessWidget {
               message: WorkbenchCopy.relinkFolder,
               child: OutlinedButton.icon(
                 key: const ValueKey('relink-source-folder'),
-                onPressed: busy ? null : onRelinkFolder,
+                onPressed: actionsDisabled
+                    ? null
+                    : () => _runAction(widget.onRelinkFolder),
                 icon: const Icon(Icons.folder_open_outlined, size: 18),
                 label: const Text(WorkbenchCopy.relinkFolder),
               ),
@@ -86,6 +98,18 @@ class _MissingSourceBanner extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _runAction(Future<void> Function() action) async {
+    if (_actionInFlight) return;
+    setState(() => _actionInFlight = true);
+    try {
+      await action();
+    } finally {
+      if (mounted) {
+        setState(() => _actionInFlight = false);
+      }
+    }
   }
 }
 
