@@ -133,6 +133,46 @@ void main() {
     );
   });
 
+  test('classify sends supplied boxes in a protocol v2 frame', () async {
+    final handle = FakeBreadWorkerHandle();
+    final client = testClient(handle);
+    final startFuture = client.start();
+    handle.emitMessage(const {'version': 2, 'type': 'ready'});
+    await startFuture;
+
+    final requestFuture = handle.nextRequest();
+    final classifyFuture = client.classify(
+      requestId: 'classify-1',
+      fileName: 'bread.png',
+      payloadLength: 2,
+      payload: Stream<List<int>>.value(const [7, 8]),
+      boxes: const [
+        {'id': 'b1', 'x': 1.0, 'y': 2.0, 'width': 3.0, 'height': 4.0},
+      ],
+    );
+    final request = await requestFuture;
+    expect(request.header['version'], 2);
+    expect(request.header['type'], 'classify');
+    expect(request.header['requestId'], 'classify-1');
+    expect((request.header['boxes'] as List).single, {
+      'id': 'b1',
+      'x': 1.0,
+      'y': 2.0,
+      'width': 3.0,
+      'height': 4.0,
+    });
+    expect(request.payload, [7, 8]);
+
+    handle.emitMessage(const {
+      'version': 2,
+      'type': 'result',
+      'requestId': 'classify-1',
+      'image': {'width': 10, 'height': 20},
+      'boxes': <Object?>[],
+    });
+    expect((await classifyFuture)['requestId'], 'classify-1');
+  });
+
   test('stderr ring buffer retains only the latest fifty lines', () async {
     final handle = FakeBreadWorkerHandle();
     final client = testClient(handle);

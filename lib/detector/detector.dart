@@ -10,12 +10,38 @@ class DetectionResult {
   const DetectionResult({
     required this.detectorName,
     required this.boxes,
+    this.imageSha256,
+    this.pipelineVersion,
+    this.policyVersion,
+    this.detectorSha256,
+    this.classifierSha256,
+    this.verifierSha256,
+    this.stageErrors = const [],
     this.errorMessage,
   });
 
   final String detectorName;
   final List<BoundingBox> boxes;
+  final String? imageSha256;
+  final String? pipelineVersion;
+  final String? policyVersion;
+  final String? detectorSha256;
+  final String? classifierSha256;
+  final String? verifierSha256;
+  final List<WorkerStageError> stageErrors;
   final String? errorMessage;
+}
+
+class WorkerStageError {
+  const WorkerStageError({
+    required this.stage,
+    required this.code,
+    required this.message,
+  });
+
+  final String stage;
+  final String code;
+  final String message;
 }
 
 class DetectionOptions {

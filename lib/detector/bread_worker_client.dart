@@ -132,6 +132,49 @@ class BreadWorkerClient {
     );
   }
 
+  Future<Map<String, Object?>> classify({
+    required String requestId,
+    required String fileName,
+    required int payloadLength,
+    required Stream<List<int>> payload,
+    required List<Map<String, Object?>> boxes,
+  }) async {
+    if (boxes.length > 100) {
+      throw WorkerProtocolException('classify accepts at most 100 boxes');
+    }
+    await start();
+    final worker = _worker!;
+    final reader = _reader!;
+    await writeWorkerRequest(
+      worker.stdin,
+      <String, Object?>{
+        'version': workerProtocolVersion,
+        'type': 'classify',
+        'requestId': requestId,
+        'fileName': fileName,
+        'boxes': boxes,
+      },
+      payloadLength,
+      payload,
+    );
+    final response = await _readMessage(reader).timeout(inferenceTimeout);
+    if (response.requestId != requestId) {
+      throw WorkerProtocolException(
+        'response requestId ${response.requestId} does not match $requestId',
+      );
+    }
+    if (response.type == 'result') return response.json;
+    if (response.type == 'error') {
+      throw WorkerRequestException(
+        response.json['code']?.toString() ?? 'unknown',
+        response.json['message']?.toString() ?? 'Worker request failed',
+      );
+    }
+    throw WorkerProtocolException(
+      'expected result or error for requestId $requestId, got ${response.type}',
+    );
+  }
+
   Future<WorkerMessage> _readMessage(WorkerByteReader reader) async {
     try {
       return await readWorkerMessage(reader);

@@ -622,6 +622,94 @@ void main() {
       expect(box.confidence, 0.91);
       expect(service.state, AutoBoxState.ready);
     });
+
+    test('accepted worker label maps to an automatic real label', () async {
+      final client = FakeBreadWorkerClient(responses: [acceptedWorkerResponse]);
+      final service = AutoBoxService(
+        createClient: () => client,
+        openImage: (_) async => testPayload(),
+      );
+
+      final result = await service.detect(testImage);
+      final box = result.boxes.single;
+
+      expect(result.imageSha256, 'image-hash');
+      expect(result.pipelineVersion, 'bread-pipeline-v1');
+      expect(result.detectorSha256, 'detector-hash');
+      expect(box.status, BoxStatus.labeled);
+      expect(box.labelId, 3);
+      expect(box.labelSource, LabelSource.auto);
+      expect(box.automation?.candidates.single.labelId, 3);
+    });
+
+    test('review worker label maps to suggestion-only proposal', () async {
+      final client = FakeBreadWorkerClient(responses: [reviewWorkerResponse]);
+      final service = AutoBoxService(
+        createClient: () => client,
+        openImage: (_) async => testPayload(),
+      );
+
+      final box = (await service.detect(testImage)).boxes.single;
+
+      expect(box.status, BoxStatus.proposal);
+      expect(box.labelId, isNull);
+      expect(box.automation?.suggestedLabelId, 3);
+      expect(box.requiresLabelReview, isTrue);
+    });
+
+    test(
+      'classifyBoxes preserves supplied box id and parses stage errors',
+      () async {
+        final response = Map<String, Object?>.from(reviewWorkerResponse)
+          ..['stageErrors'] = <Object?>[
+            <String, Object?>{
+              'stage': 'verifier',
+              'code': 'unavailable',
+              'message': 'verifier unavailable',
+            },
+          ];
+        final client = FakeBreadWorkerClient(responses: [response]);
+        final service = AutoBoxService(
+          createClient: () => client,
+          openImage: (_) async => testPayload(),
+        );
+        const supplied = BoundingBox(
+          id: 'manual-1',
+          x: 10,
+          y: 5,
+          width: 20,
+          height: 30,
+          status: BoxStatus.proposal,
+        );
+
+        final result = await service.classifyBoxes(testImage, [supplied]);
+
+        expect(client.classifyCount, 1);
+        expect(result.boxes.single.id, 'manual-1');
+        expect(result.stageErrors.single.stage, 'verifier');
+      },
+    );
+
+    test('cancel active request returns service to idle', () async {
+      final pendingResponse = Completer<Map<String, Object?>>();
+      final client = FakeBreadWorkerClient(responses: [pendingResponse.future]);
+      final service = AutoBoxService(
+        createClient: () => client,
+        openImage: (_) async => testPayload(),
+      );
+
+      final pending = service.detect(testImage);
+      final cancelled = expectLater(
+        pending,
+        throwsA(isA<AutoBoxCancelledException>()),
+      );
+      await untilState(service, AutoBoxState.running);
+      await service.cancelActiveRequest();
+
+      await cancelled;
+      expect(service.state, AutoBoxState.idle);
+      expect(client.killCount, 1);
+    });
   });
 
   group('defaultAutoBoxService', () {
@@ -748,6 +836,7 @@ class FakeBreadWorkerClient extends BreadWorkerClient {
   final Queue<Object> responses;
   int startCount = 0;
   int detectCount = 0;
+  int classifyCount = 0;
   int killCount = 0;
   int shutdownCount = 0;
   final List<String> requestIds = [];
@@ -783,6 +872,23 @@ class FakeBreadWorkerClient extends BreadWorkerClient {
   }
 
   @override
+  Future<Map<String, Object?>> classify({
+    required String requestId,
+    required String fileName,
+    required int payloadLength,
+    required Stream<List<int>> payload,
+    required List<Map<String, Object?>> boxes,
+  }) async {
+    classifyCount++;
+    requestIds.add(requestId);
+    await payload.expand((chunk) => chunk).toList();
+    final response = responses.removeFirst();
+    if (response is Future<Map<String, Object?>>) return response;
+    if (response is Map<String, Object?>) return response;
+    throw response;
+  }
+
+  @override
   Future<void> shutdown() async {
     shutdownCount++;
     if (shutdownError case final error?) {
@@ -802,6 +908,81 @@ const successfulWorkerResponse = <String, Object?>{
   'detectorName': 'bread-yolo-boxes',
   'image': <String, Object?>{'width': 100, 'height': 80},
   'boxes': <Object?>[],
+};
+
+const acceptedWorkerResponse = <String, Object?>{
+  'pipelineVersion': 'bread-pipeline-v1',
+  'policyVersion': 'bread-label-policy-v2',
+  'detectorName': 'bread-yolo-boxes',
+  'modelHashes': <String, Object?>{
+    'detector': 'detector-hash',
+    'classifier': 'classifier-hash',
+    'verifier': null,
+  },
+  'image': <String, Object?>{
+    'width': 100,
+    'height': 80,
+    'sha256': 'image-hash',
+  },
+  'boxes': <Object?>[
+    <String, Object?>{
+      'id': 'worker-1',
+      'x': 10,
+      'y': 5,
+      'width': 20,
+      'height': 30,
+      'confidence': 0.91,
+      'label': <String, Object?>{
+        'state': 'accepted',
+        'labelId': 3,
+        'suggestedLabelId': null,
+        'candidates': <Object?>[
+          <String, Object?>{'labelId': 3, 'score': 0.98},
+        ],
+        'reviewReasons': <Object?>[],
+        'embeddingUsed': false,
+      },
+    },
+  ],
+  'stageErrors': <Object?>[],
+};
+
+const reviewWorkerResponse = <String, Object?>{
+  'pipelineVersion': 'bread-pipeline-v1',
+  'policyVersion': 'bread-label-policy-v2',
+  'detectorName': 'bread-yolo-boxes',
+  'modelHashes': <String, Object?>{
+    'detector': 'detector-hash',
+    'classifier': 'classifier-hash',
+    'verifier': null,
+  },
+  'image': <String, Object?>{
+    'width': 100,
+    'height': 80,
+    'sha256': 'image-hash',
+  },
+  'boxes': <Object?>[
+    <String, Object?>{
+      'id': 'manual-1',
+      'x': 10,
+      'y': 5,
+      'width': 20,
+      'height': 30,
+      'confidence': 0.91,
+      'label': <String, Object?>{
+        'state': 'review',
+        'labelId': null,
+        'suggestedLabelId': 3,
+        'candidates': <Object?>[
+          <String, Object?>{'labelId': 3, 'score': 0.72},
+          <String, Object?>{'labelId': 5, 'score': 0.24},
+        ],
+        'reviewReasons': <Object?>['classifier_ambiguous'],
+        'embeddingUsed': false,
+      },
+    },
+  ],
+  'stageErrors': <Object?>[],
 };
 
 ImagePayload testPayload() =>

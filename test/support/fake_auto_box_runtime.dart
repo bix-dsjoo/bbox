@@ -40,6 +40,8 @@ class FakeAutoBoxRuntime extends ChangeNotifier implements AutoBoxRuntime {
 
   int warmUpCount = 0;
   int detectCount = 0;
+  int classifyCount = 0;
+  int cancelCount = 0;
   int shutdownCount = 0;
 
   void setState(AutoBoxState value, {Object? error}) {
@@ -77,6 +79,21 @@ class FakeAutoBoxRuntime extends ChangeNotifier implements AutoBoxRuntime {
       return completer.future;
     }
     return detectionResult;
+  }
+
+  @override
+  Future<DetectionResult> classifyBoxes(
+    AnnotatedImage image,
+    List<BoundingBox> boxes,
+  ) async {
+    classifyCount++;
+    return detectionResult;
+  }
+
+  @override
+  Future<void> cancelActiveRequest() async {
+    cancelCount++;
+    setState(AutoBoxState.idle);
   }
 
   @override

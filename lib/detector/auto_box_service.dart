@@ -37,10 +37,22 @@ class AutoBoxStartupException implements Exception {
   String toString() => 'AutoBoxStartupException: $cause';
 }
 
+class AutoBoxCancelledException implements Exception {
+  const AutoBoxCancelledException();
+
+  @override
+  String toString() => 'AutoBoxCancelledException: request cancelled';
+}
+
 abstract interface class AutoBoxRuntime implements Detector, Listenable {
   AutoBoxState get state;
   Object? get lastError;
   List<String> get recentStderr;
+  Future<DetectionResult> classifyBoxes(
+    AnnotatedImage image,
+    List<BoundingBox> boxes,
+  );
+  Future<void> cancelActiveRequest();
   Future<void> warmUp();
   Future<void> shutdown();
 }
@@ -69,6 +81,7 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
   bool _isShuttingDown = false;
   int _generation = 0;
   int _nextRequestId = 0;
+  Completer<void>? _activeCancellation;
 
   @override
   String get name => 'bread-yolo-boxes';
@@ -149,11 +162,64 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
       throw const AutoBoxBusyException();
     }
     _isDetecting = true;
+    final cancellation = Completer<void>();
+    _activeCancellation = cancellation;
     try {
       return await _detectOnceWithRecovery(image, path, options);
     } finally {
+      if (identical(_activeCancellation, cancellation)) {
+        _activeCancellation = null;
+      }
       _isDetecting = false;
     }
+  }
+
+  @override
+  Future<DetectionResult> classifyBoxes(
+    AnnotatedImage image,
+    List<BoundingBox> boxes,
+  ) async {
+    if (_isDetecting) throw const AutoBoxBusyException();
+    _isDetecting = true;
+    final cancellation = Completer<void>();
+    _activeCancellation = cancellation;
+    try {
+      await warmUp();
+      final generation = _generation;
+      final client = _client;
+      if (client == null) throw _shutdownCancellation();
+      _ensureClientOwner(generation, client);
+      _setState(AutoBoxState.running);
+      final response = await _sendClassification(
+        client,
+        image.sourcePath,
+        boxes,
+        generation,
+      );
+      _ensureClientOwner(generation, client);
+      final result = _parseResult(response, image);
+      _setState(AutoBoxState.ready);
+      return result;
+    } finally {
+      if (identical(_activeCancellation, cancellation)) {
+        _activeCancellation = null;
+      }
+      _isDetecting = false;
+    }
+  }
+
+  @override
+  Future<void> cancelActiveRequest() async {
+    final cancellation = _activeCancellation;
+    if (cancellation == null) return;
+    if (!cancellation.isCompleted) cancellation.complete();
+    _generation++;
+    final client = _client;
+    if (client != null) await _killClient(client);
+    _warmUpFuture = null;
+    _restartFuture = null;
+    _lastError = null;
+    _setState(AutoBoxState.idle);
   }
 
   Future<DetectionResult> _detectOnceWithRecovery(
@@ -178,6 +244,9 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
       _setState(AutoBoxState.ready);
       return result;
     } catch (error) {
+      if (error is AutoBoxCancelledException) {
+        rethrow;
+      }
       if (!_isCurrentGeneration(generation)) {
         throw _shutdownCancellation();
       }
@@ -288,12 +357,14 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
       );
     }
     try {
-      return await client.detect(
-        requestId: 'auto-box-${++_nextRequestId}',
-        fileName: p.basename(path),
-        payloadLength: payload.length,
-        payload: payload.bytes,
-        maxProposals: boundedMaxProposals(options.maxProposals),
+      return await _awaitCancelable(
+        client.detect(
+          requestId: 'auto-box-${++_nextRequestId}',
+          fileName: p.basename(path),
+          payloadLength: payload.length,
+          payload: payload.bytes,
+          maxProposals: boundedMaxProposals(options.maxProposals),
+        ),
       );
     } on FileSystemException catch (error, stackTrace) {
       Error.throwWithStackTrace(
@@ -301,6 +372,45 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
         stackTrace,
       );
     }
+  }
+
+  Future<Map<String, Object?>> _sendClassification(
+    BreadWorkerClient client,
+    String path,
+    List<BoundingBox> boxes,
+    int generation,
+  ) async {
+    final payload = await _openImage(path);
+    _ensureClientOwner(generation, client);
+    return _awaitCancelable(
+      client.classify(
+        requestId: 'auto-box-${++_nextRequestId}',
+        fileName: p.basename(path),
+        payloadLength: payload.length,
+        payload: payload.bytes,
+        boxes: [
+          for (final box in boxes.take(100))
+            <String, Object?>{
+              'id': box.id,
+              'x': box.x,
+              'y': box.y,
+              'width': box.width,
+              'height': box.height,
+            },
+        ],
+      ),
+    );
+  }
+
+  Future<T> _awaitCancelable<T>(Future<T> operation) {
+    final cancellation = _activeCancellation;
+    if (cancellation == null) return operation;
+    return Future.any<T>([
+      operation,
+      cancellation.future.then<T>(
+        (_) => throw const AutoBoxCancelledException(),
+      ),
+    ]);
   }
 
   DetectionResult _parseResult(
@@ -336,6 +446,9 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
         throw WorkerProtocolException('result boxes must be a list');
       }
       final boxes = <BoundingBox>[];
+      final pipelineVersion = response['pipelineVersion'] as String?;
+      final policyVersion = response['policyVersion'] as String?;
+      final modelHashes = response['modelHashes'] as Map<Object?, Object?>?;
       for (final rawBox in rawBoxes) {
         if (rawBox is! Map<Object?, Object?>) {
           throw WorkerProtocolException('each result box must be an object');
@@ -368,15 +481,19 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
         }
 
         boxes.add(
-          BoundingBox(
-            id: 'det-${image.id}-${boxes.length + 1}',
+          _parseBox(
+            rawBox,
+            fallbackId: 'det-${image.id}-${boxes.length + 1}',
             x: rawX,
             y: rawY,
             width: rawWidth,
             height: rawHeight,
-            status: BoxStatus.proposal,
-            labelId: null,
             confidence: confidence,
+            pipelineVersion: pipelineVersion,
+            policyVersion: policyVersion,
+            detectorSha256: modelHashes?['detector'] as String?,
+            classifierSha256: modelHashes?['classifier'] as String?,
+            verifierSha256: modelHashes?['verifier'] as String?,
           ),
         );
       }
@@ -389,12 +506,148 @@ class AutoBoxService extends ChangeNotifier implements AutoBoxRuntime {
       return DetectionResult(
         detectorName: detectorName as String? ?? name,
         boxes: boxes,
+        imageSha256: rawImage['sha256'] as String?,
+        pipelineVersion: pipelineVersion,
+        policyVersion: policyVersion,
+        detectorSha256: modelHashes?['detector'] as String?,
+        classifierSha256: modelHashes?['classifier'] as String?,
+        verifierSha256: modelHashes?['verifier'] as String?,
+        stageErrors: _parseStageErrors(response['stageErrors']),
       );
     } on WorkerProtocolException {
       rethrow;
     } catch (error) {
       throw WorkerProtocolException('invalid worker result: $error');
     }
+  }
+
+  BoundingBox _parseBox(
+    Map<Object?, Object?> raw, {
+    required String fallbackId,
+    required double x,
+    required double y,
+    required double width,
+    required double height,
+    required double? confidence,
+    required String? pipelineVersion,
+    required String? policyVersion,
+    required String? detectorSha256,
+    required String? classifierSha256,
+    required String? verifierSha256,
+  }) {
+    final rawLabel = raw['label'];
+    if (rawLabel == null) {
+      return BoundingBox(
+        id: raw['id'] as String? ?? fallbackId,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        status: BoxStatus.proposal,
+        confidence: confidence,
+      );
+    }
+    if (rawLabel is! Map<Object?, Object?>) {
+      throw WorkerProtocolException('result box label must be an object');
+    }
+    final state = rawLabel['state'];
+    final labelId = rawLabel['labelId'] as int?;
+    final suggested = rawLabel['suggestedLabelId'] as int?;
+    final candidateRows = rawLabel['candidates'];
+    final reasonRows = rawLabel['reviewReasons'];
+    if (candidateRows is! List<Object?> || reasonRows is! List<Object?>) {
+      throw WorkerProtocolException(
+        'result label candidates and reasons must be lists',
+      );
+    }
+    final candidates = <LabelCandidate>[
+      for (final item in candidateRows) _parseCandidate(item),
+    ];
+    final reasons = reasonRows
+        .map((item) {
+          if (item is! String) {
+            throw WorkerProtocolException('review reason must be a string');
+          }
+          return item;
+        })
+        .toList(growable: false);
+    if (state == 'accepted' && labelId == null) {
+      throw WorkerProtocolException('accepted label requires labelId');
+    }
+    if (state == 'review' &&
+        (labelId != null || suggested == null || reasons.isEmpty)) {
+      throw WorkerProtocolException(
+        'review label requires suggestion and reasons',
+      );
+    }
+    if (state != 'accepted' && state != 'review' && state != 'unavailable') {
+      throw WorkerProtocolException('unsupported label state: $state');
+    }
+    final metadata = BoxAutomationMetadata(
+      suggestedLabelId: state == 'review' ? suggested : null,
+      candidates: candidates,
+      reviewReasons: reasons,
+      pipelineVersion: pipelineVersion ?? '',
+      policyVersion: policyVersion ?? '',
+      detectorSha256: detectorSha256 ?? '',
+      classifierSha256: classifierSha256,
+      verifierSha256: verifierSha256,
+      embeddingUsed: rawLabel['embeddingUsed'] as bool? ?? false,
+    );
+    return BoundingBox(
+      id: raw['id'] as String? ?? fallbackId,
+      x: x,
+      y: y,
+      width: width,
+      height: height,
+      status: state == 'accepted' ? BoxStatus.labeled : BoxStatus.proposal,
+      labelId: state == 'accepted' ? labelId : null,
+      labelSource: state == 'accepted' ? LabelSource.auto : null,
+      automation: metadata,
+      confidence: confidence,
+    );
+  }
+
+  LabelCandidate _parseCandidate(Object? raw) {
+    if (raw is! Map<Object?, Object?>) {
+      throw WorkerProtocolException('label candidate must be an object');
+    }
+    final id = raw['labelId'];
+    final score = raw['score'];
+    if (id is! int ||
+        id < 1 ||
+        id > 20 ||
+        score is! num ||
+        !score.toDouble().isFinite ||
+        score < 0 ||
+        score > 1) {
+      throw WorkerProtocolException('invalid label candidate');
+    }
+    return LabelCandidate(labelId: id, score: score.toDouble());
+  }
+
+  List<WorkerStageError> _parseStageErrors(Object? raw) {
+    if (raw == null) {
+      return const [];
+    }
+    if (raw is! List<Object?>) {
+      throw WorkerProtocolException('stageErrors must be a list');
+    }
+    return [for (final item in raw) _parseStageError(item)];
+  }
+
+  WorkerStageError _parseStageError(Object? raw) {
+    if (raw is! Map<Object?, Object?> ||
+        raw['stage'] is! String ||
+        raw['code'] is! String ||
+        raw['message'] is! String) {
+      throw WorkerProtocolException('invalid stage error');
+    }
+    return WorkerStageError(
+      stage: raw['stage'] as String,
+      code: raw['code'] as String,
+      message: raw['message'] as String,
+    );
   }
 
   double _finiteBoxNumber(Map<Object?, Object?> box, String field) {
