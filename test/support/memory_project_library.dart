@@ -22,9 +22,7 @@ class MemoryProjectLibrary extends ProjectLibrary {
 
   @override
   Future<AnnotationProject> createProject(String name) async {
-    final id = _projects.containsKey(fixedId)
-        ? '$fixedId-${_projects.length + 1}'
-        : fixedId;
+    final id = _allocateProjectId();
     final projectFilePath = p.join(projectsRootPath, id, 'project.bbox.json');
     final project =
         AnnotationProject.empty(
@@ -41,9 +39,7 @@ class MemoryProjectLibrary extends ProjectLibrary {
 
   @override
   Future<AnnotationProject> importProject(AnnotationProject source) async {
-    final id = _projects.containsKey(fixedId)
-        ? '$fixedId-${_projects.length + 1}'
-        : fixedId;
+    final id = _allocateProjectId();
     final projectFilePath = p.join(projectsRootPath, id, 'project.bbox.json');
     final imported = source.copyWith(
       projectFilePath: projectFilePath,
@@ -112,5 +108,15 @@ class MemoryProjectLibrary extends ProjectLibrary {
   List<ProjectLibraryEntry> _sortedEntries() {
     return [..._entries.values]
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+  }
+
+  String _allocateProjectId() {
+    var candidate = fixedId;
+    var suffix = 2;
+    while (_projects.containsKey(candidate)) {
+      candidate = '$fixedId-$suffix';
+      suffix += 1;
+    }
+    return candidate;
   }
 }

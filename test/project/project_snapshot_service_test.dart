@@ -74,34 +74,135 @@ void main() {
           (await service.readSnapshot(transferPath)).name,
           'Transfer Demo',
         );
-        final artifactNames = await Directory(tempDir.path)
-            .list()
-            .map((entity) => p.basename(entity.path))
-            .where(
-              (name) =>
-                  name.startsWith('transfer.bbox.json.tmp-') ||
-                  name.startsWith('transfer.bbox.json.bak-'),
-            )
-            .toList();
-        expect(artifactNames, isEmpty);
+        expect(
+          await _snapshotArtifacts(tempDir, 'transfer.bbox.json'),
+          isEmpty,
+        );
       },
     );
 
     test(
-      'rejects a labeled box whose label is missing before import',
+      'restores the prior target when replacement fails after backup',
       () async {
-        final transferPath = p.join(tempDir.path, 'invalid.bbox.json');
-        final invalid = _project(projectFilePath: null).copyWith(
-          images: [
-            _project(projectFilePath: null).images.single.copyWith(
-              boxes: [
-                _project(
-                  projectFilePath: null,
-                ).images.single.boxes.single.copyWith(labelId: 999),
-              ],
-            ),
-          ],
+        final transferPath = p.join(tempDir.path, 'rollback.bbox.json');
+        await File(transferPath).writeAsString('previous contents');
+        var oldTargetMoved = false;
+        var replacementFailureInjected = false;
+        final failingService = ProjectSnapshotService.withFileRenamerForTesting(
+          clock: () => DateTime.utc(2026, 7, 15, 9, 30),
+          renameFile: (source, newPath) async {
+            if (source.path == transferPath) {
+              final renamed = await source.rename(newPath);
+              oldTargetMoved = true;
+              return renamed;
+            }
+            if (source.path.startsWith('$transferPath.tmp-') &&
+                newPath == transferPath) {
+              replacementFailureInjected = true;
+              throw FileSystemException(
+                'Injected replacement failure',
+                source.path,
+              );
+            }
+            return source.rename(newPath);
+          },
         );
+
+        await expectLater(
+          failingService.writeSnapshot(
+            _project(projectFilePath: p.join(tempDir.path, 'internal.json')),
+            transferPath,
+          ),
+          throwsA(isA<FileSystemException>()),
+        );
+
+        expect(oldTargetMoved, isTrue);
+        expect(replacementFailureInjected, isTrue);
+        expect(await File(transferPath).readAsString(), 'previous contents');
+        expect(
+          await _snapshotArtifacts(tempDir, 'rollback.bbox.json'),
+          isEmpty,
+        );
+      },
+    );
+
+    final invalidSnapshots =
+        <
+          ({
+            String name,
+            String message,
+            AnnotationProject Function(AnnotationProject) mutate,
+          })
+        >[
+          (
+            name: 'duplicate label ids',
+            message: 'duplicate label id',
+            mutate: (project) => project.copyWith(
+              labels: [project.labels.single, project.labels.single],
+            ),
+          ),
+          (
+            name: 'duplicate image ids',
+            message: 'duplicate image id',
+            mutate: (project) => project.copyWith(
+              images: [project.images.single, project.images.single],
+            ),
+          ),
+          (
+            name: 'duplicate box ids in one image',
+            message: 'duplicate box id in image 17',
+            mutate: (project) => _withBoxes(project, [
+              project.images.single.boxes.single,
+              project.images.single.boxes.single,
+            ]),
+          ),
+          (
+            name: 'missing direct label reference',
+            message: 'missing label 999 for box box-42',
+            mutate: (project) => _withBox(
+              project,
+              project.images.single.boxes.single.copyWith(labelId: 999),
+            ),
+          ),
+          (
+            name: 'missing suggested label reference',
+            message: 'missing suggested label for box box-42',
+            mutate: (project) {
+              final box = project.images.single.boxes.single;
+              return _withBox(
+                project,
+                box.copyWith(
+                  automation: box.automation!.copyWith(suggestedLabelId: 999),
+                ),
+              );
+            },
+          ),
+          (
+            name: 'missing candidate label reference',
+            message: 'missing candidate label for box box-42',
+            mutate: (project) {
+              final box = project.images.single.boxes.single;
+              return _withBox(
+                project,
+                box.copyWith(
+                  automation: box.automation!.copyWith(
+                    candidates: const [
+                      LabelCandidate(labelId: 999, score: 0.5),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ];
+
+    for (final invalidSnapshot in invalidSnapshots) {
+      test('rejects ${invalidSnapshot.name} before import', () async {
+        final transferPath = p.join(
+          tempDir.path,
+          '${invalidSnapshot.name}.bbox.json',
+        );
+        final invalid = invalidSnapshot.mutate(_project(projectFilePath: null));
         await service.writeSnapshot(invalid, transferPath);
         final library = ProjectLibrary(
           rootPath: p.join(tempDir.path, 'library'),
@@ -114,15 +215,15 @@ void main() {
             isA<InvalidProjectSnapshotException>().having(
               (error) => error.message,
               'message',
-              contains('missing label 999'),
+              invalidSnapshot.message,
             ),
           ),
         );
 
         expect(await Directory(library.projectsRootPath).exists(), isFalse);
         expect(await File(library.indexFilePath).exists(), isFalse);
-      },
-    );
+      });
+    }
 
     test('propagates unsupported project schema versions', () async {
       final transferPath = p.join(tempDir.path, 'future.bbox.json');
@@ -141,6 +242,34 @@ void main() {
       );
     });
   });
+}
+
+Future<List<String>> _snapshotArtifacts(
+  Directory directory,
+  String targetName,
+) async {
+  return directory
+      .list()
+      .map((entity) => p.basename(entity.path))
+      .where(
+        (name) =>
+            name.startsWith('$targetName.tmp-') ||
+            name.startsWith('$targetName.bak-'),
+      )
+      .toList();
+}
+
+AnnotationProject _withBox(AnnotationProject project, BoundingBox box) {
+  return _withBoxes(project, [box]);
+}
+
+AnnotationProject _withBoxes(
+  AnnotationProject project,
+  List<BoundingBox> boxes,
+) {
+  return project.copyWith(
+    images: [project.images.single.copyWith(boxes: boxes)],
+  );
 }
 
 AnnotationProject _project({required String? projectFilePath}) {

@@ -113,6 +113,32 @@ void main() {
       expect(await memory.listProjects(), hasLength(2));
     });
 
+    test(
+      'memory import does not overwrite a later id after deletion',
+      () async {
+        final memory = MemoryProjectLibrary(
+          rootPath: p.join(tempDir.path, 'memory-library'),
+          fixedId: 'memory-import',
+        );
+        final source = _externalProject(tempDir.path);
+        await memory.importProject(source.copyWith(name: 'First'));
+        await memory.importProject(source.copyWith(name: 'Second'));
+        await memory.importProject(source.copyWith(name: 'Third'));
+        await memory.deleteProject('memory-import-2');
+
+        final imported = await memory.importProject(
+          source.copyWith(name: 'Replacement'),
+        );
+
+        expect(
+          p.basename(p.dirname(imported.projectFilePath!)),
+          'memory-import-2',
+        );
+        expect((await memory.openProject('memory-import-3')).name, 'Third');
+        expect(await memory.listProjects(), hasLength(3));
+      },
+    );
+
     test('lists projects sorted by updatedAt descending', () async {
       final first = ProjectLibrary(
         rootPath: tempDir.path,

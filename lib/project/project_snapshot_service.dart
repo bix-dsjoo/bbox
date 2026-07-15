@@ -17,9 +17,18 @@ class InvalidProjectSnapshotException implements Exception {
 
 class ProjectSnapshotService {
   ProjectSnapshotService({SnapshotClock? clock})
+    : this._(clock, _defaultRenameFile);
+
+  ProjectSnapshotService.withFileRenamerForTesting({
+    SnapshotClock? clock,
+    required Future<File> Function(File source, String newPath) renameFile,
+  }) : this._(clock, renameFile);
+
+  ProjectSnapshotService._(SnapshotClock? clock, this._renameFile)
     : _clock = clock ?? DateTime.now;
 
   final SnapshotClock _clock;
+  final Future<File> Function(File source, String newPath) _renameFile;
 
   Future<void> writeSnapshot(
     AnnotationProject project,
@@ -47,10 +56,10 @@ class ProjectSnapshotService {
         flush: true,
       );
       if (await target.exists()) {
-        await target.rename(backup.path);
+        await _renameFile(target, backup.path);
         targetMovedToBackup = true;
       }
-      await temp.rename(targetPath);
+      await _renameFile(temp, targetPath);
       if (await backup.exists()) {
         await backup.delete();
       }
@@ -58,7 +67,7 @@ class ProjectSnapshotService {
       if (targetMovedToBackup &&
           !await target.exists() &&
           await backup.exists()) {
-        await backup.rename(targetPath);
+        await _renameFile(backup, targetPath);
       }
       rethrow;
     } finally {
@@ -69,6 +78,10 @@ class ProjectSnapshotService {
         await backup.delete();
       }
     }
+  }
+
+  static Future<File> _defaultRenameFile(File source, String newPath) {
+    return source.rename(newPath);
   }
 
   Future<AnnotationProject> readSnapshot(String path) async {
