@@ -27,6 +27,8 @@ typedef SourceCandidateMetadataLoader =
       String path, {
       required bool includeHash,
     });
+typedef SourcePathKey = String Function(String path);
+typedef SourceCandidateLookupObserver = void Function();
 
 class SourceRelinkResult {
   const SourceRelinkResult({
@@ -50,14 +52,19 @@ class SourceRelinkService {
   const SourceRelinkService({
     this.maxConcurrentCandidateLoads = 4,
     this.metadataLoader,
-  }) : assert(maxConcurrentCandidateLoads > 0);
+    this.pathKey = _defaultSourcePathKey,
+    this.onCandidateLookup,
+  });
 
   final int maxConcurrentCandidateLoads;
   final SourceCandidateMetadataLoader? metadataLoader;
+  final SourcePathKey pathKey;
+  final SourceCandidateLookupObserver? onCandidateLookup;
 
   Future<Map<int, SourceAvailability>> inspectSources(
     Iterable<AnnotatedImage> images,
   ) async {
+    _validateConcurrency();
     final entries = await _mapBounded(
       images.toList(growable: false),
       maxConcurrentCandidateLoads,
@@ -74,13 +81,20 @@ class SourceRelinkService {
   Future<SourceRelinkResult> relinkFiles({
     required List<AnnotatedImage> missingImages,
     required List<String> candidatePaths,
-  }) async =>
-      _match(missingImages, candidatePaths, importedFromForMatch: p.dirname);
+  }) async {
+    _validateConcurrency();
+    return _match(
+      missingImages,
+      candidatePaths,
+      importedFromForMatch: p.dirname,
+    );
+  }
 
   Future<SourceRelinkResult> relinkFolder({
     required List<AnnotatedImage> missingImages,
     required String folderPath,
   }) async {
+    _validateConcurrency();
     final root = Directory(folderPath);
     if (!await root.exists()) {
       throw FileSystemException('Image folder does not exist.', folderPath);
@@ -124,9 +138,15 @@ class SourceRelinkService {
     required String Function(String path) importedFromForMatch,
   }) async {
     final includeHash = images.any((image) => image.contentSha256 != null);
-    final uniquePaths = {
-      for (final path in paths) _pathKey(path),
-    }.toList(growable: false);
+    final uniquePathsByKey = <String, String>{};
+    for (final path in paths) {
+      final normalizedPath = p.normalize(p.absolute(path));
+      uniquePathsByKey.putIfAbsent(
+        pathKey(normalizedPath),
+        () => normalizedPath,
+      );
+    }
+    final uniquePaths = uniquePathsByKey.values.toList(growable: false);
     final inspected = await _mapBounded(
       uniquePaths,
       maxConcurrentCandidateLoads,
@@ -137,50 +157,66 @@ class SourceRelinkService {
         if (inspection.metadata != null) inspection.metadata!,
     ];
     final byPath = {
-      for (final candidate in candidates) _pathKey(candidate.path): candidate,
+      for (final candidate in candidates) pathKey(candidate.path): candidate,
     };
+    final buckets = <_CandidateBucketKey, List<_CandidateMetadata>>{};
+    for (final candidate in candidates) {
+      for (final key in candidate.bucketKeys) {
+        buckets.putIfAbsent(key, () => <_CandidateMetadata>[]).add(candidate);
+      }
+    }
 
-    final proposals = <int, List<_CandidateMetadata>>{};
+    final preferredByImage = <int, _CandidateMetadata>{};
+    final generalOwners = <_CandidateBucketKey, List<int>>{};
     for (final image in images) {
       final preferred = preferredPaths[image.id];
       final preferredCandidate = preferred == null
           ? null
-          : byPath[_pathKey(preferred)];
-      if (preferredCandidate != null && _matches(image, preferredCandidate)) {
-        proposals[image.id] = [preferredCandidate];
+          : byPath[pathKey(preferred)];
+      final imageKey = _CandidateBucketKey.forImage(image);
+      if (preferredCandidate != null &&
+          preferredCandidate.bucketKeys.contains(imageKey)) {
+        preferredByImage[image.id] = preferredCandidate;
         continue;
       }
-      proposals[image.id] = [
-        for (final candidate in candidates)
-          if (_matches(image, candidate)) candidate,
-      ];
+      onCandidateLookup?.call();
+      generalOwners.putIfAbsent(imageKey, () => <int>[]).add(image.id);
     }
 
     final ambiguous = <int>{};
-    final ownersByPath = <String, Set<int>>{};
-    for (final entry in proposals.entries) {
-      for (final candidate in entry.value) {
-        ownersByPath
-            .putIfAbsent(_pathKey(candidate.path), () => <int>{})
-            .add(entry.key);
-      }
-    }
-    for (final owners in ownersByPath.values) {
-      if (owners.length > 1) ambiguous.addAll(owners);
-    }
-
     final single = <int, _CandidateMetadata>{};
-    for (final entry in proposals.entries) {
-      if (entry.value.length > 1) {
-        ambiguous.add(entry.key);
-      } else if (entry.value.length == 1) {
-        single[entry.key] = entry.value.single;
+    for (final entry in generalOwners.entries) {
+      final bucket = buckets[entry.key] ?? const <_CandidateMetadata>[];
+      if (bucket.isEmpty) {
+        continue;
+      }
+      if (bucket.length != 1 || entry.value.length != 1) {
+        ambiguous.addAll(entry.value);
+      } else {
+        single[entry.value.single] = bucket.single;
       }
     }
 
-    for (final imageId in ambiguous) {
-      single.remove(imageId);
+    final preferredOwnersByPath = <String, List<int>>{};
+    for (final entry in preferredByImage.entries) {
+      preferredOwnersByPath
+          .putIfAbsent(pathKey(entry.value.path), () => <int>[])
+          .add(entry.key);
     }
+    for (final entry in preferredOwnersByPath.entries) {
+      if (entry.value.length > 1) ambiguous.addAll(entry.value);
+    }
+    for (final entry in preferredByImage.entries) {
+      final candidate = entry.value;
+      for (final bucketKey in candidate.bucketKeys) {
+        final owners = generalOwners[bucketKey];
+        if (owners == null || owners.isEmpty) continue;
+        ambiguous.add(entry.key);
+        ambiguous.addAll(owners);
+      }
+      if (!ambiguous.contains(entry.key)) single[entry.key] = candidate;
+    }
+    single.removeWhere((imageId, _) => ambiguous.contains(imageId));
 
     final matchedPaths = <int, String>{};
     final matchedImportedFrom = <int, String>{};
@@ -207,14 +243,6 @@ class SourceRelinkService {
     );
   }
 
-  bool _matches(AnnotatedImage image, _CandidateMetadata candidate) {
-    final expectedHash = image.contentSha256;
-    if (expectedHash != null) return candidate.sha256 == expectedHash;
-    return candidate.fileNameKey == image.displayName.toLowerCase() &&
-        candidate.width == image.width &&
-        candidate.height == image.height;
-  }
-
   Future<_CandidateInspection> _inspectCandidate(
     String path,
     bool includeHash,
@@ -236,6 +264,16 @@ class SourceRelinkService {
       );
     } catch (_) {
       return _CandidateInspection.unreadable(path);
+    }
+  }
+
+  void _validateConcurrency() {
+    if (maxConcurrentCandidateLoads <= 0) {
+      throw ArgumentError.value(
+        maxConcurrentCandidateLoads,
+        'maxConcurrentCandidateLoads',
+        'must be positive',
+      );
     }
   }
 }
@@ -260,13 +298,26 @@ Future<SourceCandidateMetadata?> _loadCandidateMetadata(
   );
 }
 
-String _pathKey(String path) => p.normalize(p.absolute(path));
+String sourcePathKey(String path, {required bool isWindows}) {
+  final normalized = p.normalize(p.absolute(path));
+  return isWindows ? normalized.toLowerCase() : normalized;
+}
+
+String _defaultSourcePathKey(String path) =>
+    sourcePathKey(path, isWindows: Platform.isWindows);
 
 Future<List<R>> _mapBounded<T, R>(
   List<T> values,
   int maxConcurrent,
   Future<R> Function(T value) transform,
 ) async {
+  if (maxConcurrent <= 0) {
+    throw ArgumentError.value(
+      maxConcurrent,
+      'maxConcurrent',
+      'must be positive',
+    );
+  }
   if (values.isEmpty) return <R>[];
   final results = List<R?>.filled(values.length, null);
   var nextIndex = 0;
@@ -312,4 +363,51 @@ class _CandidateMetadata {
   final int width;
   final int height;
   final String? sha256;
+
+  Iterable<_CandidateBucketKey> get bucketKeys sync* {
+    final hash = sha256;
+    if (hash != null) yield _CandidateBucketKey.hash(hash);
+    yield _CandidateBucketKey.file(fileNameKey, width, height);
+  }
+}
+
+class _CandidateBucketKey {
+  const _CandidateBucketKey._({
+    this.sha256,
+    this.fileNameKey,
+    this.width,
+    this.height,
+  });
+
+  const _CandidateBucketKey.hash(String sha256) : this._(sha256: sha256);
+
+  const _CandidateBucketKey.file(String fileNameKey, int width, int height)
+    : this._(fileNameKey: fileNameKey, width: width, height: height);
+
+  factory _CandidateBucketKey.forImage(AnnotatedImage image) {
+    final hash = image.contentSha256;
+    return hash != null
+        ? _CandidateBucketKey.hash(hash)
+        : _CandidateBucketKey.file(
+            image.displayName.toLowerCase(),
+            image.width,
+            image.height,
+          );
+  }
+
+  final String? sha256;
+  final String? fileNameKey;
+  final int? width;
+  final int? height;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _CandidateBucketKey &&
+      other.sha256 == sha256 &&
+      other.fileNameKey == fileNameKey &&
+      other.width == width &&
+      other.height == height;
+
+  @override
+  int get hashCode => Object.hash(sha256, fileNameKey, width, height);
 }

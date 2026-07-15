@@ -272,6 +272,7 @@ void main() {
     final caseUpper = p.join(tempDir.path, 'case', 'Bread.png');
     final caseLower = p.join(tempDir.path, 'case', 'bread.png');
     final seamService = SourceRelinkService(
+      pathKey: (path) => sourcePathKey(path, isWindows: false),
       metadataLoader: (path, {required includeHash}) async {
         loadedPaths.add(path);
         return const SourceCandidateMetadata(width: 32, height: 24);
@@ -291,6 +292,45 @@ void main() {
     expect(loadedPaths.toSet(), {p.absolute(caseUpper), p.absolute(caseLower)});
     expect(result.matchedPaths, isEmpty);
     expect(result.ambiguousImageIds, {1});
+  });
+
+  test(
+    'Windows path keys collapse case while non-Windows keys preserve it',
+    () {
+      const upper = r'C:\Data\Bread.PNG';
+      const lower = r'c:\data\bread.png';
+
+      expect(
+        sourcePathKey(upper, isWindows: true),
+        sourcePathKey(lower, isWindows: true),
+      );
+      expect(
+        sourcePathKey(upper, isWindows: false),
+        isNot(sourcePathKey(lower, isWindows: false)),
+      );
+    },
+  );
+
+  test('Windows-equivalent candidate paths are loaded only once', () async {
+    var loads = 0;
+    final seamService = SourceRelinkService(
+      pathKey: (path) => sourcePathKey(path, isWindows: true),
+      metadataLoader: (path, {required includeHash}) async {
+        loads += 1;
+        return const SourceCandidateMetadata(width: 32, height: 24);
+      },
+    );
+
+    final result = await seamService.relinkFiles(
+      missingImages: [
+        _image(sourcePath: r'C:\old\bread.png', displayName: 'bread.png'),
+      ],
+      candidatePaths: const [r'C:\Data\bread.png', r'c:\data\BREAD.PNG'],
+    );
+
+    expect(loads, 1);
+    expect(result.matchedCount, 1);
+    expect(result.ambiguousImageIds, isEmpty);
   });
 
   test('corrupt candidate is diagnosed without hiding a valid match', () async {
@@ -349,6 +389,59 @@ void main() {
 
       expect(peakLoads, 2);
       expect(result.matchedCount, candidatePaths.length);
+    },
+  );
+
+  test(
+    'rejects non-positive candidate concurrency on every public path',
+    () async {
+      const invalid = SourceRelinkService(maxConcurrentCandidateLoads: 0);
+
+      await expectLater(
+        invalid.inspectSources(const []),
+        throwsA(isA<ArgumentError>()),
+      );
+      await expectLater(
+        invalid.relinkFiles(missingImages: const [], candidatePaths: const []),
+        throwsA(isA<ArgumentError>()),
+      );
+    },
+  );
+
+  test(
+    'collision-heavy matching performs one indexed lookup per image',
+    () async {
+      const count = 600;
+      var metadataLoads = 0;
+      var lookups = 0;
+      final seamService = SourceRelinkService(
+        onCandidateLookup: () => lookups += 1,
+        metadataLoader: (path, {required includeHash}) async {
+          metadataLoads += 1;
+          return const SourceCandidateMetadata(width: 32, height: 24);
+        },
+      );
+      final candidates = [
+        for (var index = 0; index < count; index++)
+          p.join(tempDir.path, 'candidate-$index', 'bread.png'),
+      ];
+      final images = [
+        for (var index = 0; index < count; index++)
+          _image(
+            id: index + 1,
+            sourcePath: p.join(tempDir.path, 'old-$index', 'bread.png'),
+          ),
+      ];
+
+      final result = await seamService.relinkFiles(
+        missingImages: images,
+        candidatePaths: candidates,
+      );
+
+      expect(metadataLoads, count);
+      expect(lookups, count);
+      expect(result.matchedPaths, isEmpty);
+      expect(result.ambiguousImageIds, hasLength(count));
     },
   );
 }
