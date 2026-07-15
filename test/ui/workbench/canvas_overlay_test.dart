@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:image/image.dart' as img;
 
+import '../../support/fake_auto_box_runtime.dart';
 import 'workbench_test_support.dart';
 
 void main() {
@@ -21,7 +22,7 @@ void main() {
         img.encodePng(img.Image(width: 80, height: 60)),
       );
 
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(
         AnnotationProject.empty(name: 'demo').copyWith(
           status: ProjectStatus.ready,
@@ -52,7 +53,7 @@ void main() {
       final imageFile = File('${tempDir.path}${Platform.pathSeparator}a.png');
       imageFile.writeAsBytesSync(img.encodePng(fixtureImage(100, 80)));
 
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(
         project().copyWith(
           images: [
@@ -73,7 +74,8 @@ void main() {
     });
 
     testWidgets('selected box renders eight resize handles', (tester) async {
-      final controller = AppController()..loadProject(project());
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(project());
       controller.selectBox('box-1');
 
       await tester.pumpWidget(app(controller));
@@ -98,7 +100,8 @@ void main() {
     testWidgets('selected resize handles are centered on box boundaries', (
       tester,
     ) async {
-      final controller = AppController()..loadProject(project());
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(project());
       controller.selectBox('box-1');
 
       await tester.pumpWidget(app(controller));
@@ -133,7 +136,8 @@ void main() {
     testWidgets(
       'resize handle visual keeps the same screen size after zooming',
       (tester) async {
-        final controller = AppController()..loadProject(project());
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+          ..loadProject(project());
         controller.selectBox('box-1');
 
         await tester.pumpWidget(app(controller));
@@ -156,7 +160,9 @@ void main() {
           isNull,
         );
 
-        final zoomOutController = AppController()..loadProject(project());
+        final zoomOutController = AppController(
+          autoBoxRuntime: FakeAutoBoxRuntime(),
+        )..loadProject(project());
         zoomOutController.selectBox('box-1');
 
         await tester.pumpWidget(app(zoomOutController));
@@ -183,7 +189,8 @@ void main() {
     testWidgets('selected resize handle uses a visible design surface', (
       tester,
     ) async {
-      final controller = AppController()..loadProject(project());
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(project());
       controller.selectBox('box-1');
 
       await tester.pumpWidget(app(controller));
@@ -201,7 +208,8 @@ void main() {
     testWidgets('overlay label position does not move when box is selected', (
       tester,
     ) async {
-      final controller = AppController()..loadProject(project());
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(project());
 
       await tester.pumpWidget(app(controller));
       final unselectedLabelTopLeft = tester.getTopLeft(
@@ -222,7 +230,8 @@ void main() {
     testWidgets('overlay label keeps screen size after zooming', (
       tester,
     ) async {
-      final controller = AppController()..loadProject(project());
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(project());
       controller.selectBox('box-1');
 
       await tester.pumpWidget(app(controller));
@@ -252,7 +261,7 @@ void main() {
     testWidgets('unselected unlabeled canvas boxes use compact number badges', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(overlappingProject());
 
       await tester.pumpWidget(app(controller));
@@ -277,7 +286,7 @@ void main() {
     testWidgets('selected unlabeled canvas box shows number and state', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(overlappingProject());
       controller.selectBox('box-2');
 
@@ -303,7 +312,7 @@ void main() {
     testWidgets('canvas boxes expose the selection semantics label', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(overlappingProject());
       controller.selectBox('box-2');
 
@@ -327,7 +336,7 @@ void main() {
     testWidgets(
       'narrow labeled canvas boxes use label-only text while wider boxes keep numbers',
       (tester) async {
-        final controller = AppController();
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
         controller.loadProject(narrowLabelProject());
 
         await tester.pumpWidget(app(controller));
@@ -351,7 +360,7 @@ void main() {
     testWidgets(
       'badge text stays out of semantics while the box label remains exposed',
       (tester) async {
-        final controller = AppController();
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
         controller.loadProject(overlappingProject());
         controller.selectBox('box-2');
 
@@ -403,7 +412,8 @@ void main() {
     testWidgets('selected box is rendered after overlapping unselected boxes', (
       tester,
     ) async {
-      final controller = AppController()..loadProject(overlappingProject());
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(overlappingProject());
       controller.selectBox('box-1');
 
       await tester.pumpWidget(app(controller));
@@ -424,7 +434,8 @@ void main() {
     testWidgets('selected automatic box keeps high contrast gray styling', (
       tester,
     ) async {
-      final controller = AppController()..loadProject(project());
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(project());
       controller.selectBox('box-1');
 
       await tester.pumpWidget(app(controller));
@@ -441,7 +452,8 @@ void main() {
     testWidgets('contrast layer does not block box interaction', (
       tester,
     ) async {
-      final controller = AppController()..loadProject(project());
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(project());
 
       await tester.pumpWidget(app(controller));
 
@@ -467,7 +479,7 @@ void main() {
     testWidgets(
       'labeled box uses white outline and category-colored name badge',
       (tester) async {
-        final controller = AppController()
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
           ..loadProject(
             project().copyWith(
               images: [
@@ -517,7 +529,7 @@ void main() {
           detectorSha256: 'detector-hash',
         ),
       );
-      final controller = AppController()
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
         ..loadProject(
           project().copyWith(
             images: [
@@ -549,7 +561,7 @@ void main() {
       final imageFile = File('${tempDir.path}${Platform.pathSeparator}a.png');
       imageFile.writeAsBytesSync(img.encodePng(fixtureImage(100, 80)));
 
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       final loadingProject = project().copyWith(
         images: [
           project().images.first.copyWith(sourcePath: imageFile.path),

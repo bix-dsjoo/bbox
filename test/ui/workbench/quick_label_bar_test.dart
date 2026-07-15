@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../support/fake_auto_box_runtime.dart';
 import 'workbench_test_support.dart';
 
 void main() {
@@ -10,7 +11,7 @@ void main() {
     testWidgets('selecting a box keeps the global quick-label bar available', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
 
       await tester.pumpWidget(app(controller));
@@ -34,7 +35,7 @@ void main() {
     testWidgets('quick label chip assigns an existing label to selected box', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
 
       await tester.pumpWidget(app(controller));
@@ -50,7 +51,7 @@ void main() {
     testWidgets('selected quick label chip uses orange selected styling', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
 
       await tester.pumpWidget(app(controller));
@@ -74,7 +75,7 @@ void main() {
     testWidgets('label shortcuts assign the first twenty labels', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project().copyWith(labels: createDefaultLabels()));
 
       await tester.pumpWidget(app(controller));
@@ -90,7 +91,7 @@ void main() {
     testWidgets('workbench shows a global bottom quick-label bar', (
       tester,
     ) async {
-      final controller = AppController()
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
         ..loadProject(projectWithSelectedImage());
 
       await tester.pumpWidget(
@@ -110,7 +111,7 @@ void main() {
     });
 
     testWidgets('quick label bar shows twenty shortcut slots', (tester) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project().copyWith(labels: createDefaultLabels()));
 
       await tester.pumpWidget(app(controller));
@@ -136,7 +137,7 @@ void main() {
     testWidgets('quick label bar centers shortcut content on wide screens', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(
         project().copyWith(
           labels: const [
@@ -167,7 +168,7 @@ void main() {
       tester,
     ) async {
       const longLabelName = 'Very Long Donut Package Label';
-      final controller = AppController()
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
         ..loadProject(
           project().copyWith(
             labels: const [
@@ -201,7 +202,7 @@ void main() {
     testWidgets('quick label bar shows an empty state when no labels exist', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project().copyWith(labels: const []));
 
       await tester.pumpWidget(app(controller));
@@ -224,7 +225,7 @@ void main() {
     testWidgets(
       'label management popover creates a label that can be assigned',
       (tester) async {
-        final controller = AppController();
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
         controller.loadProject(project().copyWith(labels: const []));
 
         await tester.pumpWidget(app(controller));
@@ -260,7 +261,7 @@ void main() {
     testWidgets(
       'label management overlay opens from the trigger as a non-modal overlay',
       (tester) async {
-        final controller = AppController();
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
         controller.loadProject(project());
 
         await tester.pumpWidget(app(controller));
@@ -297,7 +298,7 @@ void main() {
     testWidgets(
       'label management popover stays inside a 1585x943 viewport at the right edge',
       (tester) async {
-        final controller = AppController()
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
           ..loadProject(
             project().copyWith(labels: createDefaultLabels().take(10).toList()),
           );
@@ -343,7 +344,7 @@ void main() {
     testWidgets('label management popover stays inside a 1280x720 viewport', (
       tester,
     ) async {
-      final controller = AppController()
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
         ..loadProject(
           project().copyWith(labels: createDefaultLabels().take(10).toList()),
         );
@@ -378,7 +379,7 @@ void main() {
     testWidgets(
       'label management popover stays inside at a left-edge trigger',
       (tester) async {
-        final controller = AppController()
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
           ..loadProject(project().copyWith(labels: const []));
 
         await tester.binding.setSurfaceSize(const Size(800, 720));
@@ -407,7 +408,7 @@ void main() {
     testWidgets('drawn unlabeled box stays selected and shows quick labels', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
 
       await tester.pumpWidget(app(controller));
@@ -431,7 +432,7 @@ void main() {
     testWidgets(
       'assigning a label changes proposal to label color and enables confirm',
       (tester) async {
-        final controller = AppController();
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
         controller.loadProject(project());
 
         await tester.pumpWidget(app(controller));
@@ -454,7 +455,7 @@ void main() {
     testWidgets('creates labels from the label management popover', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project().copyWith(labels: const []));
 
       await tester.pumpWidget(app(controller));
@@ -485,7 +486,7 @@ void main() {
     testWidgets(
       'label management popover shows inline errors and keeps editing open',
       (tester) async {
-        final controller = AppController();
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
         controller.loadProject(project());
 
         await tester.pumpWidget(app(controller));
@@ -521,7 +522,7 @@ void main() {
     testWidgets(
       'label shortcut does not assign while a label text input has focus',
       (tester) async {
-        final controller = AppController();
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
         controller.loadProject(overlappingProject());
         controller.selectBox('box-1');
 

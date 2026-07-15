@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:image/image.dart' as img;
 
+import '../../support/fake_auto_box_runtime.dart';
 import 'workbench_test_support.dart';
 
 void main() {
@@ -12,7 +13,7 @@ void main() {
     testWidgets('canvas toolbar exposes select draw and pan tools', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
 
       await tester.pumpWidget(app(controller));
@@ -41,7 +42,7 @@ void main() {
     testWidgets('selected canvas tool uses orange selected styling', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
 
       await tester.pumpWidget(app(controller));
@@ -58,7 +59,7 @@ void main() {
     });
 
     testWidgets('keyboard switches canvas tools predictably', (tester) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
 
       await tester.pumpWidget(app(controller));
@@ -77,7 +78,7 @@ void main() {
     testWidgets('default background drag pans instead of creating a box', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
       final initialCount = controller.selectedImage!.boxCount;
 
@@ -96,7 +97,7 @@ void main() {
     testWidgets('draw tool creates one box and stays in draw mode', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
       final initialCount = controller.selectedImage!.boxCount;
 
@@ -131,7 +132,7 @@ void main() {
         'bbox_zoom_draw_over_box',
       );
       addTearDown(() => tempDir.deleteSync(recursive: true));
-      final controller = AppController()
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
         ..loadProject(projectWithRenderedImage(tempDir));
       final initialCount = controller.selectedImage!.boxCount;
 
@@ -164,7 +165,7 @@ void main() {
           'bbox_zoom_draw_viewport_edge',
         );
         addTearDown(() => tempDir.deleteSync(recursive: true));
-        final controller = AppController()
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
           ..loadProject(projectWithRenderedImage(tempDir));
         final initialCount = controller.selectedImage!.boxCount;
 
@@ -194,7 +195,7 @@ void main() {
     testWidgets('pan tool never creates boxes from background drag', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
       final initialCount = controller.selectedImage!.boxCount;
 
@@ -219,7 +220,7 @@ void main() {
     ) async {
       final tempDir = Directory.systemTemp.createTempSync('bbox_select_pan');
       addTearDown(() => tempDir.deleteSync(recursive: true));
-      final controller = AppController()
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
         ..loadProject(projectWithRenderedImage(tempDir));
 
       await tester.binding.setSurfaceSize(const Size(1440, 900));
@@ -248,7 +249,7 @@ void main() {
         );
         addTearDown(() => tempDir.deleteSync(recursive: true));
         final project = projectWithRenderedImage(tempDir);
-        final controller = AppController()
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
           ..loadProject(
             project.copyWith(
               images: [
@@ -305,7 +306,7 @@ void main() {
     ) async {
       final tempDir = Directory.systemTemp.createTempSync('bbox_wheel_zoom');
       addTearDown(() => tempDir.deleteSync(recursive: true));
-      final controller = AppController()
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
         ..loadProject(projectWithRenderedImage(tempDir));
 
       await tester.binding.setSurfaceSize(const Size(1440, 900));
@@ -334,7 +335,7 @@ void main() {
         'bbox_wheel_viewport_space',
       );
       addTearDown(() => tempDir.deleteSync(recursive: true));
-      final controller = AppController()
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
         ..loadProject(projectWithRenderedImage(tempDir));
 
       await tester.binding.setSurfaceSize(const Size(1440, 900));
@@ -368,7 +369,7 @@ void main() {
     testWidgets('space temporarily prioritizes panning while in draw mode', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
       final initialCount = controller.selectedImage!.boxCount;
 
@@ -395,7 +396,7 @@ void main() {
     });
 
     testWidgets('dragging a selected box moves the box', (tester) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
 
       await tester.pumpWidget(app(controller));
@@ -419,7 +420,9 @@ void main() {
     testWidgets('zoomed selected box drag moves less in original pixels', (
       tester,
     ) async {
-      final unzoomedController = AppController()..loadProject(project());
+      final unzoomedController = AppController(
+        autoBoxRuntime: FakeAutoBoxRuntime(),
+      )..loadProject(project());
       unzoomedController.selectBox('box-1');
 
       await tester.pumpWidget(app(unzoomedController));
@@ -432,7 +435,9 @@ void main() {
       final unzoomedAfter = unzoomedController.selectedImage!.boxes.single;
       final unzoomedDelta = unzoomedAfter.x - unzoomedBefore.x;
 
-      final zoomedController = AppController()..loadProject(project());
+      final zoomedController = AppController(
+        autoBoxRuntime: FakeAutoBoxRuntime(),
+      )..loadProject(project());
       zoomedController.selectBox('box-1');
 
       await tester.pumpWidget(app(zoomedController));
@@ -459,7 +464,7 @@ void main() {
       addTearDown(() => tempDir.deleteSync(recursive: true));
       final imageFile = File('${tempDir.path}${Platform.pathSeparator}a.png');
       imageFile.writeAsBytesSync(img.encodePng(fixtureImage(100, 80)));
-      final controller = AppController()
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
         ..loadProject(
           project().copyWith(
             images: [
@@ -509,7 +514,7 @@ void main() {
       addTearDown(() => tempDir.deleteSync(recursive: true));
       final imageFile = File('${tempDir.path}${Platform.pathSeparator}a.png');
       imageFile.writeAsBytesSync(img.encodePng(fixtureImage(100, 80)));
-      final controller = AppController()
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
         ..loadProject(
           project().copyWith(
             images: [
@@ -549,7 +554,7 @@ void main() {
           'bbox_viewport_hit_alignment',
         );
         addTearDown(() => tempDir.deleteSync(recursive: true));
-        final controller = AppController()
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
           ..loadProject(projectWithRenderedImage(tempDir));
 
         await tester.binding.setSurfaceSize(const Size(1440, 900));
@@ -580,7 +585,7 @@ void main() {
           'bbox_viewport_edit_alignment',
         );
         addTearDown(() => tempDir.deleteSync(recursive: true));
-        final controller = AppController()
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
           ..loadProject(projectWithRenderedImage(tempDir));
 
         await tester.binding.setSurfaceSize(const Size(1440, 900));
@@ -634,7 +639,7 @@ void main() {
     testWidgets('dragging the resize handle changes box size only', (
       tester,
     ) async {
-      final controller = AppController();
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime());
       controller.loadProject(project());
 
       await tester.pumpWidget(app(controller));
