@@ -75,6 +75,27 @@ void main() {
       expect((coco['annotations'] as List<Object?>), hasLength(1));
     });
 
+    test('counts white red and gray states and exports white labels only', () {
+      final project = _automationStateProject();
+
+      final summary = CocoExporter.validate(project);
+      final coco = CocoExporter.build(project);
+
+      expect(summary.autoLabeledBoxCount, 1);
+      expect(summary.userLabeledBoxCount, 1);
+      expect(summary.reviewRequiredBoxCount, 1);
+      expect(summary.unlabeledProposalBoxCount, 1);
+      expect((coco['annotations'] as List<Object?>), hasLength(2));
+      expect(
+        (coco['annotations'] as List<Object?>).cast<Map<String, Object?>>().map(
+          (annotation) => annotation['category_id'],
+        ),
+        [1, 7],
+      );
+      expect(coco.toString(), isNot(contains('automation')));
+      expect(coco.toString(), isNot(contains('reviewReasons')));
+    });
+
     test('invalid labeled boxes create blocking export errors', () {
       final project = _project().copyWith(
         images: [
@@ -110,6 +131,70 @@ void main() {
       );
     });
   });
+}
+
+AnnotationProject _automationStateProject() {
+  return AnnotationProject.empty(name: 'automation-states').copyWith(
+    labels: const [
+      LabelClass(id: 1, name: 'Person', color: 0xffe64a19),
+      LabelClass(id: 7, name: 'Car', color: 0xff1976d2),
+    ],
+    images: const [
+      AnnotatedImage(
+        id: 1,
+        sourcePath: 'a.jpg',
+        displayName: 'a.jpg',
+        width: 100,
+        height: 80,
+        status: ImageStatus.needsReview,
+        boxes: [
+          BoundingBox(
+            id: 'auto',
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            status: BoxStatus.labeled,
+            labelId: 1,
+            labelSource: LabelSource.auto,
+          ),
+          BoundingBox(
+            id: 'user',
+            x: 20,
+            y: 1,
+            width: 10,
+            height: 10,
+            status: BoxStatus.labeled,
+            labelId: 7,
+            labelSource: LabelSource.user,
+          ),
+          BoundingBox(
+            id: 'review',
+            x: 40,
+            y: 1,
+            width: 10,
+            height: 10,
+            status: BoxStatus.proposal,
+            automation: BoxAutomationMetadata(
+              suggestedLabelId: 1,
+              reviewReasons: ['classifier_ambiguous'],
+              pipelineVersion: 'v1',
+              policyVersion: 'policy-v1',
+              detectorSha256: 'detector-hash',
+            ),
+          ),
+          BoundingBox(
+            id: 'gray',
+            x: 60,
+            y: 1,
+            width: 10,
+            height: 10,
+            status: BoxStatus.proposal,
+          ),
+        ],
+      ),
+    ],
+  );
 }
 
 AnnotationProject _project() {

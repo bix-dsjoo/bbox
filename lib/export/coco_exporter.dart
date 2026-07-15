@@ -16,18 +16,25 @@ class CocoExportOptions {
 class CocoExportSummary {
   const CocoExportSummary({
     required this.unconfirmedImageCount,
+    this.autoLabeledBoxCount = 0,
+    this.userLabeledBoxCount = 0,
+    this.reviewRequiredBoxCount = 0,
     required this.unlabeledProposalBoxCount,
     required this.errorImageCount,
     required this.blockingErrors,
   });
 
   final int unconfirmedImageCount;
+  final int autoLabeledBoxCount;
+  final int userLabeledBoxCount;
+  final int reviewRequiredBoxCount;
   final int unlabeledProposalBoxCount;
   final int errorImageCount;
   final List<String> blockingErrors;
 
   bool get hasWarnings =>
       unconfirmedImageCount > 0 ||
+      reviewRequiredBoxCount > 0 ||
       unlabeledProposalBoxCount > 0 ||
       errorImageCount > 0;
 
@@ -52,7 +59,10 @@ class CocoExporter {
   }) {
     final images = _selectImages(project, options);
     var unconfirmed = 0;
-    var proposals = 0;
+    var autoLabeled = 0;
+    var userLabeled = 0;
+    var reviewRequired = 0;
+    var unlabeledProposals = 0;
     var errors = 0;
     final blockingErrors = <String>[];
 
@@ -68,8 +78,16 @@ class CocoExporter {
         unconfirmed++;
       }
       for (final box in image.visibleBoxes) {
-        if (box.status == BoxStatus.proposal || box.labelId == null) {
-          proposals++;
+        if (box.status == BoxStatus.labeled && box.labelId != null) {
+          if (box.labelSource == LabelSource.auto) {
+            autoLabeled++;
+          } else {
+            userLabeled++;
+          }
+        } else if (box.requiresLabelReview) {
+          reviewRequired++;
+        } else {
+          unlabeledProposals++;
         }
         if (box.status == BoxStatus.labeled) {
           if (!AnnotationRules.isBoxValid(
@@ -92,7 +110,10 @@ class CocoExporter {
 
     return CocoExportSummary(
       unconfirmedImageCount: unconfirmed,
-      unlabeledProposalBoxCount: proposals,
+      autoLabeledBoxCount: autoLabeled,
+      userLabeledBoxCount: userLabeled,
+      reviewRequiredBoxCount: reviewRequired,
+      unlabeledProposalBoxCount: unlabeledProposals,
       errorImageCount: errors,
       blockingErrors: blockingErrors,
     );

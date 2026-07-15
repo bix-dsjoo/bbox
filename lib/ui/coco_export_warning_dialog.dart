@@ -41,8 +41,24 @@ class _CocoExportWarningDialogState extends State<CocoExportWarningDialog> {
           children: [
             Text('검토 필요 이미지: ${widget.summary.unconfirmedImageCount}'),
             Text(
-              '라벨 필요한 자동 박스: '
-              '${widget.summary.unlabeledProposalBoxCount}',
+              WorkbenchCopy.exportAutoLabeledBoxes(
+                widget.summary.autoLabeledBoxCount,
+              ),
+            ),
+            Text(
+              WorkbenchCopy.exportUserLabeledBoxes(
+                widget.summary.userLabeledBoxCount,
+              ),
+            ),
+            Text(
+              WorkbenchCopy.exportReviewRequiredBoxes(
+                widget.summary.reviewRequiredBoxCount,
+              ),
+            ),
+            Text(
+              WorkbenchCopy.exportUnclassifiedBoxes(
+                widget.summary.unlabeledProposalBoxCount,
+              ),
             ),
             Text('문제 있는 이미지: ${widget.summary.errorImageCount}'),
             for (final error in widget.summary.blockingErrors)

@@ -162,6 +162,14 @@ class WorkbenchCopy {
 
   static String autoBoxesCreated(int count) => '자동 박스 $count개 생성';
 
+  static String exportAutoLabeledBoxes(int count) => '자동 라벨 박스: $count';
+
+  static String exportUserLabeledBoxes(int count) => '사용자 라벨 박스: $count';
+
+  static String exportReviewRequiredBoxes(int count) => '제외되는 검토 필요 박스: $count';
+
+  static String exportUnclassifiedBoxes(int count) => '제외되는 미분류 박스: $count';
+
   static String invalidBoxCount(int count) => '유효하지 않은 박스 $count개';
 
   static String unlabeledBoxCount(int count) => '라벨 필요 박스 $count개';

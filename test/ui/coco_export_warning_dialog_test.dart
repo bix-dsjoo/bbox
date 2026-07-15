@@ -7,6 +7,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 const _summary = CocoExportSummary(
   unconfirmedImageCount: 1,
+  autoLabeledBoxCount: 2,
+  userLabeledBoxCount: 3,
+  reviewRequiredBoxCount: 4,
   unlabeledProposalBoxCount: 1,
   errorImageCount: 0,
   blockingErrors: [],
@@ -31,6 +34,19 @@ Widget _app({
 }
 
 void main() {
+  testWidgets('shows automatic user review and unclassified counts', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(pickDestination: () async => null, writeExport: (_) async {}),
+    );
+
+    expect(find.text('자동 라벨 박스: 2'), findsOneWidget);
+    expect(find.text('사용자 라벨 박스: 3'), findsOneWidget);
+    expect(find.text('제외되는 검토 필요 박스: 4'), findsOneWidget);
+    expect(find.text('제외되는 미분류 박스: 1'), findsOneWidget);
+  });
+
   testWidgets('cancel restores retry and a second attempt succeeds', (
     tester,
   ) async {
