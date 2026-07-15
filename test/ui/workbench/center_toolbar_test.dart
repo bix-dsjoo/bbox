@@ -434,6 +434,97 @@ void main() {
       expect(controller.selectedBox!.labelSource, LabelSource.user);
     });
 
+    testWidgets(
+      'enter follows a focused non-review button instead of applying',
+      (tester) async {
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+          ..loadProject(_reviewCandidateProject())
+          ..selectBox('review-box');
+        addTearDown(controller.dispose);
+        controller.moveReviewCandidate(1);
+
+        await tester.pumpWidget(app(controller));
+        final removeButton = find.byKey(
+          const ValueKey('remove-image-from-project'),
+        );
+        final removeLabel = find.descendant(
+          of: removeButton,
+          matching: find.text(WorkbenchCopy.removeImageFromProject),
+        );
+        Focus.of(tester.element(removeLabel)).requestFocus();
+        await tester.pump();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('confirm-remove-image-from-project')),
+          findsOneWidget,
+        );
+        final reviewBox = controller.project!.images.first.boxes.firstWhere(
+          (box) => box.id == 'review-box',
+        );
+        expect(reviewBox.status, BoxStatus.proposal);
+        expect(reviewBox.labelId, isNull);
+      },
+    );
+
+    testWidgets(
+      'enter follows a focused quick label instead of review selection',
+      (tester) async {
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+          ..loadProject(_reviewCandidateProject())
+          ..selectBox('review-box');
+        addTearDown(controller.dispose);
+        controller.moveReviewCandidate(1);
+
+        await tester.pumpWidget(app(controller));
+        final quickLabel = find.byKey(const ValueKey('quick-label-1'));
+        final quickLabelText = find.descendant(
+          of: quickLabel,
+          matching: find.text('Person'),
+        );
+        Focus.of(tester.element(quickLabelText)).requestFocus();
+        await tester.pump();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+
+        expect(controller.selectedBox!.labelId, 1);
+        expect(controller.selectedBox!.labelSource, LabelSource.user);
+      },
+    );
+
+    testWidgets('focused review candidate region keeps arrow and enter keys', (
+      tester,
+    ) async {
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(_reviewCandidateProject())
+        ..selectBox('review-box');
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(app(controller));
+      final controls = find.byKey(const ValueKey('review-candidate-controls'));
+      expect(controls, findsOneWidget);
+      final candidateOne = find.byKey(const ValueKey('review-candidate-1'));
+      final candidateLabel = find.descendant(
+        of: candidateOne,
+        matching: find.text('Person'),
+      );
+      Focus.of(tester.element(candidateLabel)).requestFocus();
+      await tester.pump();
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      expect(controller.selectedReviewCandidateLabelId, 2);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+
+      expect(controller.selectedBox!.labelId, 2);
+      expect(controller.selectedBox!.labelSource, LabelSource.user);
+    });
+
     testWidgets('review keys do not apply while a text input has focus', (
       tester,
     ) async {
@@ -629,5 +720,40 @@ void main() {
 FilledButton _autoBoxesButton(WidgetTester tester) {
   return tester.widget<FilledButton>(
     find.byKey(const ValueKey('auto-boxes-current-image')),
+  );
+}
+
+AnnotationProject _reviewCandidateProject() {
+  return project().copyWith(
+    labels: const [
+      LabelClass(id: 1, name: 'Person', color: 0xffe64a19, shortcut: '1'),
+      LabelClass(id: 2, name: 'Pastry', color: 0xff006699, shortcut: '2'),
+    ],
+    images: [
+      project().images.first.copyWith(
+        boxes: const [
+          BoundingBox(
+            id: 'review-box',
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 20,
+            status: BoxStatus.proposal,
+            automation: BoxAutomationMetadata(
+              suggestedLabelId: 1,
+              candidates: [
+                LabelCandidate(labelId: 1, score: 0.58),
+                LabelCandidate(labelId: 2, score: 0.42),
+              ],
+              reviewReasons: ['low_margin'],
+              pipelineVersion: 'test-v1',
+              policyVersion: 'test-policy-v1',
+              detectorSha256: 'detector-hash',
+            ),
+          ),
+        ],
+      ),
+      project().images.last,
+    ],
   );
 }

@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../support/fake_auto_box_runtime.dart';
 import 'workbench_test_support.dart';
 
 void main() {
@@ -851,8 +852,56 @@ void main() {
 
         expect(find.text(WorkbenchCopy.noReviewCandidates), findsOneWidget);
         expect(find.text(WorkbenchCopy.noReviewCandidatesHint), findsOneWidget);
+        expect(
+          tester
+              .widget<FilledButton>(
+                find.byKey(const ValueKey('apply-review-candidate')),
+              )
+              .onPressed,
+          isNull,
+        );
       },
     );
+
+    testWidgets('review candidate controls disable while automation runs', (
+      tester,
+    ) async {
+      final detectionCompleter = Completer<DetectionResult>();
+      final runtime = FakeAutoBoxRuntime(
+        detectionCompleter: detectionCompleter,
+      );
+      final controller = AppController(autoBoxRuntime: runtime)
+        ..loadProject(_reviewCandidateProject())
+        ..selectBox('review-box');
+      addTearDown(controller.dispose);
+
+      final pendingDetection = controller.detectSelectedImage(
+        replaceExisting: true,
+      );
+      await tester.pumpWidget(app(controller));
+      expect(controller.isAutomationRunning, isTrue);
+
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const ValueKey('apply-review-candidate')),
+            )
+            .onPressed,
+        isNull,
+      );
+      final candidateSemantics = tester.getSemantics(
+        find.byKey(const ValueKey('review-candidate-1')),
+      );
+      expect(candidateSemantics.flagsCollection.isEnabled, Tristate.isFalse);
+      expect(controller.selectedBox!.status, BoxStatus.proposal);
+      expect(controller.selectedBox!.labelId, isNull);
+
+      detectionCompleter.complete(
+        const DetectionResult(detectorName: 'review-controls-test', boxes: []),
+      );
+      await pendingDetection;
+      await tester.pump();
+    });
 
     testWidgets('review apply action scrolls into view at 1280 by 720', (
       tester,

@@ -50,6 +50,7 @@ class _ViewerPanelState extends State<_ViewerPanel> {
     final image = controller.selectedImage;
 
     return Focus(
+      key: const ValueKey('workbench-canvas-focus'),
       focusNode: _focusNode,
       autofocus: true,
       onKeyEvent: _handleCanvasKey,

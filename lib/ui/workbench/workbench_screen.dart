@@ -319,7 +319,7 @@ class WorkbenchScreen extends StatelessWidget {
               child: Focus(
                 autofocus: true,
                 onKeyEvent: (node, event) =>
-                    _handleWorkbenchKey(event, project),
+                    _handleWorkbenchKey(node, event, project),
                 child: Column(
                   children: [
                     if (controller.missingSourceCount > 0)
@@ -566,6 +566,7 @@ class WorkbenchScreen extends StatelessWidget {
   }
 
   KeyEventResult _handleWorkbenchKey(
+    FocusNode workbenchFocusNode,
     KeyEvent event,
     AnnotationProject project,
   ) {
@@ -582,6 +583,14 @@ class WorkbenchScreen extends StatelessWidget {
       return KeyEventResult.ignored;
     }
     if (controller.selectedBox?.requiresLabelReview == true) {
+      final reviewNavigationKey =
+          event.logicalKey == LogicalKeyboardKey.arrowUp ||
+          event.logicalKey == LogicalKeyboardKey.arrowDown ||
+          event.logicalKey == LogicalKeyboardKey.enter;
+      if (reviewNavigationKey &&
+          !_reviewCandidateShortcutsHaveFocus(workbenchFocusNode)) {
+        return KeyEventResult.ignored;
+      }
       if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
         controller.moveReviewCandidate(-1);
         return KeyEventResult.handled;
@@ -605,6 +614,33 @@ class WorkbenchScreen extends StatelessWidget {
     }
     controller.assignSelectedBoxLabel(label.id);
     return KeyEventResult.handled;
+  }
+
+  bool _reviewCandidateShortcutsHaveFocus(FocusNode workbenchFocusNode) {
+    if (workbenchFocusNode.hasPrimaryFocus) {
+      return true;
+    }
+    const controlsKey = ValueKey('review-candidate-controls');
+    const canvasFocusKey = ValueKey('workbench-canvas-focus');
+    final focusContext = FocusManager.instance.primaryFocus?.context;
+    if (focusContext == null) {
+      return false;
+    }
+    if (focusContext.widget.key == canvasFocusKey) {
+      return true;
+    }
+    if (focusContext.widget.key == controlsKey) {
+      return true;
+    }
+    var insideControls = false;
+    focusContext.visitAncestorElements((element) {
+      if (element.widget.key == controlsKey) {
+        insideControls = true;
+        return false;
+      }
+      return true;
+    });
+    return insideControls;
   }
 
   bool _textInputHasFocus() {

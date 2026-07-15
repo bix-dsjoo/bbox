@@ -237,6 +237,118 @@ void main() {
     },
   );
 
+  test('review candidates exist only for the active review box', () {
+    final project = _reviewCandidateProject();
+    final autoLabeledBox = project.images.first.boxes.first.copyWith(
+      status: BoxStatus.labeled,
+      labelId: 1,
+      labelSource: LabelSource.auto,
+    );
+    final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+      ..loadProject(
+        project.copyWith(
+          images: [
+            project.images.first.copyWith(boxes: [autoLabeledBox]),
+          ],
+        ),
+      )
+      ..selectBox('review-box');
+    addTearDown(controller.dispose);
+
+    expect(controller.selectedBox!.requiresLabelReview, isFalse);
+    expect(controller.selectedReviewCandidates, isEmpty);
+    expect(controller.selectedReviewCandidateLabelId, isNull);
+  });
+
+  test('suggestion without explicit candidates has no review selection', () {
+    final project = _reviewCandidateProject();
+    final reviewBox = project.images.first.boxes.first.copyWith(
+      automation: project.images.first.boxes.first.automation!.copyWith(
+        candidates: const [],
+      ),
+    );
+    final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+      ..loadProject(
+        project.copyWith(
+          images: [
+            project.images.first.copyWith(boxes: [reviewBox]),
+          ],
+        ),
+      )
+      ..selectBox('review-box');
+    addTearDown(controller.dispose);
+
+    expect(controller.selectedBox!.requiresLabelReview, isTrue);
+    expect(controller.selectedReviewCandidates, isEmpty);
+    expect(controller.selectedReviewCandidateLabelId, isNull);
+  });
+
+  test('applying the only review box is idempotent after selection clears', () {
+    final project = _reviewCandidateProject();
+    final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+      ..loadProject(
+        project.copyWith(
+          images: [
+            project.images.first.copyWith(
+              boxes: [project.images.first.boxes.first],
+            ),
+          ],
+        ),
+      )
+      ..selectBox('review-box');
+    addTearDown(controller.dispose);
+
+    controller.applySelectedReviewCandidate();
+
+    expect(controller.selectedReviewCandidateLabelId, isNull);
+    expect(controller.selectedBox!.labelId, 1);
+    expect(controller.selectedBox!.labelSource, LabelSource.user);
+
+    controller.applySelectedReviewCandidate();
+    controller.undo();
+
+    expect(controller.selectedBox!.status, BoxStatus.proposal);
+    expect(controller.selectedBox!.labelId, isNull);
+  });
+
+  test(
+    'applying a review candidate is blocked while automation runs',
+    () async {
+      final detectionCompleter = Completer<DetectionResult>();
+      final runtime = FakeAutoBoxRuntime(
+        detectionCompleter: detectionCompleter,
+      );
+      final project = _reviewCandidateProject();
+      final controller = AppController(autoBoxRuntime: runtime)
+        ..loadProject(
+          project.copyWith(
+            images: [
+              project.images.first.copyWith(
+                boxes: [project.images.first.boxes.first],
+              ),
+            ],
+          ),
+        )
+        ..selectBox('review-box');
+      addTearDown(controller.dispose);
+
+      final pendingDetection = controller.detectSelectedImage(
+        replaceExisting: true,
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.isAutomationRunning, isTrue);
+
+      controller.applySelectedReviewCandidate();
+
+      expect(controller.selectedBox!.status, BoxStatus.proposal);
+      expect(controller.selectedBox!.labelId, isNull);
+      expect(controller.canUndo, isFalse);
+
+      detectionCompleter.complete(_oneBoxResult('replacement-box'));
+      await pendingDetection;
+    },
+  );
+
   test(
     'review candidate state stays synchronized through assignment history and deletion',
     () {

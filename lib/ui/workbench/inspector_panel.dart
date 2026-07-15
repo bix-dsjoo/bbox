@@ -886,67 +886,73 @@ class _ReviewEvidence extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final candidates = controller.selectedReviewCandidates;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: WorkbenchPalette.dangerSoft.withAlpha(110),
-        borderRadius: BorderRadius.circular(AppRadii.badge),
-        border: Border.all(color: WorkbenchPalette.danger.withAlpha(70)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            for (final reason in metadata.reviewReasons)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 3),
-                child: Text(
-                  WorkbenchCopy.reviewReasonLabel(reason),
-                  style: Theme.of(context).textTheme.bodySmall,
+    final automationRunning = controller.isAutomationRunning;
+    return KeyedSubtree(
+      key: const ValueKey('review-candidate-controls'),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: WorkbenchPalette.dangerSoft.withAlpha(110),
+          borderRadius: BorderRadius.circular(AppRadii.badge),
+          border: Border.all(color: WorkbenchPalette.danger.withAlpha(70)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final reason in metadata.reviewReasons)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 3),
+                  child: Text(
+                    WorkbenchCopy.reviewReasonLabel(reason),
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
                 ),
-              ),
-            const SizedBox(height: 7),
-            Text(
-              WorkbenchCopy.chooseReviewCandidate,
-              style: Theme.of(
-                context,
-              ).textTheme.labelMedium?.copyWith(fontWeight: FontWeight.w800),
-            ),
-            if (candidates.isEmpty) ...[
-              const SizedBox(height: 8),
+              const SizedBox(height: 7),
               Text(
-                WorkbenchCopy.noReviewCandidates,
+                WorkbenchCopy.chooseReviewCandidate,
                 style: Theme.of(
                   context,
-                ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                ).textTheme.labelMedium?.copyWith(fontWeight: FontWeight.w800),
               ),
-              const SizedBox(height: 3),
-              Text(
-                WorkbenchCopy.noReviewCandidatesHint,
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ] else ...[
-              const SizedBox(height: 5),
-              for (final candidate in candidates)
-                _CandidateScoreRow(
-                  controller: controller,
-                  project: project,
-                  candidate: candidate,
+              if (candidates.isEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  WorkbenchCopy.noReviewCandidates,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
                 ),
-            ],
-            const SizedBox(height: 9),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                key: const ValueKey('apply-review-candidate'),
-                onPressed: controller.selectedReviewCandidateLabelId == null
-                    ? null
-                    : controller.applySelectedReviewCandidate,
-                icon: const Icon(Icons.keyboard_return, size: 16),
-                label: const Text(WorkbenchCopy.applyReviewCandidate),
+                const SizedBox(height: 3),
+                Text(
+                  WorkbenchCopy.noReviewCandidatesHint,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ] else ...[
+                const SizedBox(height: 5),
+                for (final candidate in candidates)
+                  _CandidateScoreRow(
+                    controller: controller,
+                    project: project,
+                    candidate: candidate,
+                  ),
+              ],
+              const SizedBox(height: 9),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  key: const ValueKey('apply-review-candidate'),
+                  onPressed:
+                      automationRunning ||
+                          controller.selectedReviewCandidateLabelId == null
+                      ? null
+                      : controller.applySelectedReviewCandidate,
+                  icon: const Icon(Icons.keyboard_return, size: 16),
+                  label: const Text(WorkbenchCopy.applyReviewCandidate),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -974,6 +980,7 @@ class _CandidateScoreRow extends StatelessWidget {
       padding: const EdgeInsets.only(top: 3),
       child: Semantics(
         button: true,
+        enabled: !controller.isAutomationRunning,
         selected: selected,
         label:
             '${label?.name ?? '#${candidate.labelId}'}, '
@@ -988,7 +995,10 @@ class _CandidateScoreRow extends StatelessWidget {
             borderRadius: BorderRadius.circular(AppRadii.row),
             onTap: controller.isAutomationRunning
                 ? null
-                : () => controller.selectReviewCandidate(candidate.labelId),
+                : () {
+                    Focus.of(context).requestFocus();
+                    controller.selectReviewCandidate(candidate.labelId);
+                  },
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 8),
               child: Row(

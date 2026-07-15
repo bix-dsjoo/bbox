@@ -225,6 +225,9 @@ class AppController extends ChangeNotifier {
   }
 
   List<LabelCandidate> get selectedReviewCandidates {
+    if (selectedBox?.requiresLabelReview != true) {
+      return const <LabelCandidate>[];
+    }
     final candidates =
         selectedBox?.automation?.candidates ?? const <LabelCandidate>[];
     final validIds =
@@ -1163,8 +1166,16 @@ class AppController extends ChangeNotifier {
   }
 
   void applySelectedReviewCandidate() {
+    if (isAutomationRunning || selectedBox?.requiresLabelReview != true) {
+      return;
+    }
     final labelId = _selectedReviewCandidateLabelId;
-    if (labelId == null) return;
+    if (labelId == null ||
+        !selectedReviewCandidates.any(
+          (candidate) => candidate.labelId == labelId,
+        )) {
+      return;
+    }
     assignSelectedBoxLabel(labelId);
   }
 
@@ -1753,11 +1764,7 @@ class AppController extends ChangeNotifier {
       _selectedReviewCandidateLabelId = candidates.first.labelId;
       return;
     }
-    final suggestion = selectedBox?.automation?.suggestedLabelId;
-    final validSuggestion =
-        suggestion != null &&
-        (_project?.labels.any((label) => label.id == suggestion) ?? false);
-    _selectedReviewCandidateLabelId = validSuggestion ? suggestion : null;
+    _selectedReviewCandidateLabelId = null;
   }
 
   void _replaceSelectedImage(AnnotatedImage updatedImage) {
