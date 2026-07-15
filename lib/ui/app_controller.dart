@@ -18,7 +18,9 @@ import '../detector/worker_protocol.dart';
 import '../export/coco_exporter.dart';
 import '../image_import/image_scanner.dart';
 import '../project/project_library.dart';
+import '../project/project_snapshot_service.dart';
 import '../project/project_store.dart';
+import '../project/source_relink_service.dart';
 import 'workbench_copy.dart';
 
 enum SaveStatus { saved, saving, failed }
@@ -55,15 +57,23 @@ class ImageImportProgress {
 class AppController extends ChangeNotifier {
   AppController({
     ProjectLibrary? projectLibrary,
+    ProjectSnapshotService? projectSnapshotService,
+    SourceRelinkService? sourceRelinkService,
     AutoBoxRuntime? autoBoxRuntime,
     BoxLabelCache? boxLabelCache,
   }) : _projectLibrary = projectLibrary ?? ProjectLibrary.appData(),
+       _projectSnapshotService =
+           projectSnapshotService ?? ProjectSnapshotService(),
+       _sourceRelinkService =
+           sourceRelinkService ?? const SourceRelinkService(),
        _autoBoxRuntime = autoBoxRuntime ?? defaultAutoBoxService(),
        _boxLabelCache = boxLabelCache ?? BoxLabelCache() {
     _autoBoxRuntime.addListener(_handleAutoBoxRuntimeChanged);
   }
 
   final ProjectLibrary _projectLibrary;
+  final ProjectSnapshotService _projectSnapshotService;
+  final SourceRelinkService _sourceRelinkService;
   final AutoBoxRuntime _autoBoxRuntime;
   final BoxLabelCache _boxLabelCache;
 
@@ -89,6 +99,8 @@ class AppController extends ChangeNotifier {
   bool _classificationInFlight = false;
   bool _classificationPending = false;
   final Map<int, String> _pipelineVersionsByImageId = {};
+  Map<int, SourceAvailability> _sourceAvailability = const {};
+  int _sourceRefreshGeneration = 0;
 
   final List<AnnotationProject> _undoStack = [];
   final List<AnnotationProject> _redoStack = [];
@@ -102,6 +114,16 @@ class AppController extends ChangeNotifier {
   SaveStatus get saveStatus => _saveStatus;
 
   Object? get lastSaveError => _lastSaveError;
+
+  Map<int, SourceAvailability> get sourceAvailability =>
+      Map.unmodifiable(_sourceAvailability);
+
+  int get missingSourceCount => _sourceAvailability.values
+      .where((value) => value == SourceAvailability.missing)
+      .length;
+
+  SourceAvailability get selectedSourceAvailability =>
+      _sourceAvailability[selectedImageId] ?? SourceAvailability.unknown;
 
   void clearLastUserMessage() {
     if (lastUserMessage == null) {
@@ -150,15 +172,12 @@ class AppController extends ChangeNotifier {
 
   Future<void> shutdownAutoBoxes() => _autoBoxRuntime.shutdown();
 
-  SelectedImageViewState get selectedImageViewState {
-    final image = selectedImage;
-    if (image == null) {
-      return SelectedImageViewState.unknown;
-    }
-    return File(image.sourcePath).existsSync()
-        ? SelectedImageViewState.ready
-        : SelectedImageViewState.missing;
-  }
+  SelectedImageViewState get selectedImageViewState =>
+      switch (selectedSourceAvailability) {
+        SourceAvailability.available => SelectedImageViewState.ready,
+        SourceAvailability.missing => SelectedImageViewState.missing,
+        SourceAvailability.unknown => SelectedImageViewState.unknown,
+      };
 
   AnnotatedImage? get selectedImage {
     final project = _project;
@@ -239,6 +258,7 @@ class AppController extends ChangeNotifier {
       status: ProjectStatus.ready,
       labels: createDefaultLabels(),
     );
+    _resetSourceAvailability(_project);
     _currentLibraryProjectId = _libraryProjectIdForPath(projectFilePath);
     _selectedImageId = null;
     _selectedBoxId = null;
@@ -258,6 +278,7 @@ class AppController extends ChangeNotifier {
     final migratedProject = migrateMissingLabelShortcuts(project);
     final migrated = !identical(migratedProject, project);
     _project = migratedProject;
+    _resetSourceAvailability(_project);
     _currentLibraryProjectId = _libraryProjectIdForPath(
       _project!.projectFilePath,
     );
@@ -281,7 +302,11 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> openProject(String projectFilePath) async {
-    loadProject(await ProjectStore.load(projectFilePath));
+    final requestEpoch = _projectEpoch;
+    final opened = await ProjectStore.load(projectFilePath);
+    if (requestEpoch != _projectEpoch) return;
+    loadProject(opened);
+    await refreshSourceAvailability();
   }
 
   Future<void> loadProjectLibrary() async {
@@ -301,6 +326,7 @@ class AppController extends ChangeNotifier {
     final created = await _projectLibrary.createProject(name);
     _projectEpoch++;
     _project = created;
+    _resetSourceAvailability(_project);
     _currentLibraryProjectId = _libraryProjectIdForPath(
       _project!.projectFilePath,
     );
@@ -317,12 +343,16 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> openLibraryProject(String id) async {
-    loadProject(await _projectLibrary.openProject(id));
+    final requestEpoch = _projectEpoch;
+    final opened = await _projectLibrary.openProject(id);
+    if (requestEpoch != _projectEpoch) return;
+    loadProject(opened);
     _currentLibraryProjectId = id;
     _projectLibraryEntries = await _projectLibrary.listProjects();
     _saveStatus = SaveStatus.saved;
     _lastSaveError = null;
     notifyListeners();
+    await refreshSourceAvailability();
   }
 
   Future<void> renameLibraryProject(String id, String name) async {
@@ -345,6 +375,7 @@ class AppController extends ChangeNotifier {
     if (_currentLibraryProjectId == id) {
       _projectEpoch++;
       _project = null;
+      _resetSourceAvailability(null);
       _currentLibraryProjectId = null;
       _selectedImageId = null;
       _selectedBoxId = null;
@@ -383,6 +414,7 @@ class AppController extends ChangeNotifier {
   void debugSetProjectForTest(AnnotationProject project) {
     _projectEpoch++;
     _project = project;
+    _resetSourceAvailability(_project);
     _repairSelection();
     notifyListeners();
   }
@@ -409,6 +441,56 @@ class AppController extends ChangeNotifier {
       lastError = error;
       _lastSaveError = error;
       _saveStatus = SaveStatus.failed;
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  Future<void> saveProjectSnapshot(String targetPath) async {
+    final requestEpoch = _projectEpoch;
+    try {
+      await _waitForAutoSaveIdle();
+      if (requestEpoch != _projectEpoch) {
+        throw StateError(
+          'The active project changed. Choose the snapshot path and try again.',
+        );
+      }
+      await _projectSnapshotService.writeSnapshot(
+        _requireProject(),
+        targetPath,
+      );
+      lastUserMessage = 'Project snapshot saved to $targetPath';
+      notifyListeners();
+    } catch (error) {
+      lastError = error;
+      lastUserMessage =
+          'Could not save the project snapshot. Check the destination path, permissions, and disk space, then try again.';
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  Future<void> importProjectSnapshot(String sourcePath) async {
+    final requestEpoch = _projectEpoch;
+    try {
+      final source = await _projectSnapshotService.readSnapshot(sourcePath);
+      final imported = await _projectLibrary.importProject(source);
+      final entries = await _projectLibrary.listProjects();
+      if (requestEpoch != _projectEpoch) {
+        _projectLibraryEntries = entries;
+        notifyListeners();
+        return;
+      }
+      loadProject(imported);
+      _currentLibraryProjectId = _libraryProjectIdForPath(
+        imported.projectFilePath,
+      );
+      _projectLibraryEntries = entries;
+      await refreshSourceAvailability();
+    } catch (error) {
+      lastError = error;
+      lastUserMessage =
+          'Could not import the project snapshot. Verify the file and choose a writable project library, then try again.';
       notifyListeners();
       rethrow;
     }
@@ -456,45 +538,153 @@ class AppController extends ChangeNotifier {
   }
 
   Future<List<String>> validateSourceFiles() async {
+    await refreshSourceAvailability();
     final project = _project;
-    if (project == null) {
-      return const [];
-    }
+    if (project == null) return const [];
+    return [
+      for (final image in project.images)
+        if (_sourceAvailability[image.id] == SourceAvailability.missing)
+          image.sourcePath,
+    ];
+  }
+
+  Future<void> refreshSourceAvailability() async {
+    final project = _project;
+    if (project == null) return;
+    final projectEpoch = _projectEpoch;
+    final generation = ++_sourceRefreshGeneration;
     _projectActivity = ProjectActivity.validating;
     notifyListeners();
-    final missing = <String>[];
-    final nextImages = <AnnotatedImage>[];
-    var changed = false;
-    for (final image in project.images) {
-      if (File(image.sourcePath).existsSync()) {
-        nextImages.add(image);
-        continue;
-      }
-      missing.add(image.sourcePath);
-      final updated =
-          image.status == ImageStatus.error &&
-              image.errorMessage == 'Source image file not found'
-          ? image
-          : image.copyWith(
-              status: ImageStatus.error,
-              errorMessage: 'Source image file not found',
-            );
-      if (updated != image) {
-        changed = true;
-      }
-      nextImages.add(updated);
-    }
-    if (changed) {
-      _recordUndo();
-      _project = project.copyWith(
-        images: nextImages,
-        status: ProjectStatus.error,
+    try {
+      final inspected = await _sourceRelinkService.inspectSources(
+        project.images,
       );
-      _scheduleAutoSave();
+      if (projectEpoch != _projectEpoch ||
+          generation != _sourceRefreshGeneration) {
+        return;
+      }
+      final current = _project;
+      if (current == null) return;
+      _sourceAvailability = {
+        for (final image in current.images)
+          image.id: inspected[image.id] ?? SourceAvailability.unknown,
+      };
+    } catch (error) {
+      if (projectEpoch == _projectEpoch &&
+          generation == _sourceRefreshGeneration) {
+        lastError = error;
+        lastUserMessage =
+            'Could not check source files. Check file access and reconnect the storage location, then try again.';
+      }
+      rethrow;
+    } finally {
+      if (projectEpoch == _projectEpoch &&
+          generation == _sourceRefreshGeneration &&
+          _projectActivity == ProjectActivity.validating) {
+        _projectActivity = ProjectActivity.idle;
+        notifyListeners();
+      }
     }
-    _projectActivity = ProjectActivity.idle;
+  }
+
+  Future<SourceRelinkResult> relinkSourceFiles(List<String> paths) async {
+    return _relink(
+      (missingImages) => _sourceRelinkService.relinkFiles(
+        missingImages: missingImages,
+        candidatePaths: paths,
+      ),
+    );
+  }
+
+  Future<SourceRelinkResult> relinkSelectedSourceFile(String path) async {
+    final image = selectedImage;
+    if (image == null ||
+        _sourceAvailability[image.id] != SourceAvailability.missing) {
+      return const SourceRelinkResult(
+        matchedPaths: {},
+        matchedImportedFrom: {},
+        unresolvedImageIds: {},
+        ambiguousImageIds: {},
+      );
+    }
+    return _relink(
+      (missingImages) => _sourceRelinkService.relinkFiles(
+        missingImages: [image],
+        candidatePaths: [path],
+      ),
+      requestedImages: [image],
+    );
+  }
+
+  Future<SourceRelinkResult> relinkSourceFolder(String folderPath) async {
+    return _relink(
+      (missingImages) => _sourceRelinkService.relinkFolder(
+        missingImages: missingImages,
+        folderPath: folderPath,
+      ),
+    );
+  }
+
+  List<AnnotatedImage> _missingImages() => [
+    for (final image in _requireProject().images)
+      if (_sourceAvailability[image.id] == SourceAvailability.missing) image,
+  ];
+
+  Future<SourceRelinkResult> _relink(
+    Future<SourceRelinkResult> Function(List<AnnotatedImage> missingImages)
+    operation, {
+    List<AnnotatedImage>? requestedImages,
+  }) async {
+    final projectEpoch = _projectEpoch;
+    final missingImages = requestedImages ?? _missingImages();
+    final originalPaths = {
+      for (final image in missingImages) image.id: image.sourcePath,
+    };
+    _projectActivity = ProjectActivity.validating;
     notifyListeners();
-    return missing;
+    try {
+      final result = await operation(missingImages);
+      if (projectEpoch != _projectEpoch) return result;
+      if (result.matchedPaths.isNotEmpty) {
+        final project = _requireProject();
+        _project = project.copyWith(
+          images: [
+            for (final image in project.images)
+              if (result.matchedPaths.containsKey(image.id) &&
+                  originalPaths[image.id] == image.sourcePath)
+                image.copyWith(
+                  sourcePath: result.matchedPaths[image.id],
+                  importedFrom: result.matchedImportedFrom[image.id],
+                )
+              else
+                image,
+          ],
+        );
+        _scheduleAutoSave();
+      }
+      await refreshSourceAvailability();
+      if (projectEpoch == _projectEpoch) {
+        lastUserMessage = result.matchedCount > 0
+            ? 'Reconnected ${result.matchedCount} source file(s).'
+            : 'No source files were reconnected. Review unresolved or ambiguous matches and choose a specific file if needed.';
+        notifyListeners();
+      }
+      return result;
+    } catch (error) {
+      if (projectEpoch == _projectEpoch) {
+        lastError = error;
+        lastUserMessage =
+            'Could not reconnect source files. Check the selected files, folder access, and image dimensions, then try again.';
+        notifyListeners();
+      }
+      rethrow;
+    } finally {
+      if (projectEpoch == _projectEpoch &&
+          _projectActivity == ProjectActivity.validating) {
+        _projectActivity = ProjectActivity.idle;
+        notifyListeners();
+      }
+    }
   }
 
   void removeImageFromProject(int imageId) {
@@ -515,6 +705,8 @@ class AppController extends ChangeNotifier {
       images: nextImages,
       status: ProjectStatus.ready,
     );
+    _sourceAvailability = Map<int, SourceAvailability>.from(_sourceAvailability)
+      ..remove(imageId);
     _repairSelectionAfterRemoval();
     _imageViewLoadState = ImageViewLoadState(
       imageId: _selectedImageId,
@@ -1132,6 +1324,8 @@ class AppController extends ChangeNotifier {
     _redoStack.add(_project!);
     _project = _undoStack.removeLast();
     _repairSelection();
+    _resetSourceAvailability(_project);
+    unawaited(refreshSourceAvailability());
     notifyListeners();
   }
 
@@ -1145,12 +1339,15 @@ class AppController extends ChangeNotifier {
     _undoStack.add(_project!);
     _project = _redoStack.removeLast();
     _repairSelection();
+    _resetSourceAvailability(_project);
+    unawaited(refreshSourceAvailability());
     notifyListeners();
   }
 
   void _clearActiveProject() {
     _projectEpoch++;
     _project = null;
+    _resetSourceAvailability(null);
     _currentLibraryProjectId = null;
     _selectedImageId = null;
     _selectedBoxId = null;
@@ -1214,6 +1411,7 @@ class AppController extends ChangeNotifier {
     var errors = 0;
     var nextId = project.nextImageId;
     final nextImages = <AnnotatedImage>[...project.images];
+    final addedImageIds = <int>[];
     try {
       for (final scanned in scannedImages) {
         processed += 1;
@@ -1246,6 +1444,7 @@ class AppController extends ChangeNotifier {
           errorMessage: scanned.errorMessage,
         );
         nextImages.add(importedImage);
+        addedImageIds.add(importedImage.id);
         added += 1;
         if (scanned.hasError) {
           errors += 1;
@@ -1263,6 +1462,12 @@ class AppController extends ChangeNotifier {
         status: ProjectStatus.ready,
         images: nextImages,
       );
+      _sourceRefreshGeneration++;
+      _sourceAvailability = {
+        ..._sourceAvailability,
+        for (final imageId in addedImageIds)
+          imageId: SourceAvailability.available,
+      };
       _repairSelectionAfterImport(nextImages);
       _scheduleAutoSave();
     } finally {
@@ -1553,6 +1758,22 @@ class AppController extends ChangeNotifier {
     unawaited(_autoSaveChain);
   }
 
+  Future<void> _waitForAutoSaveIdle() async {
+    while (true) {
+      final pending = _autoSaveChain;
+      await pending;
+      if (identical(pending, _autoSaveChain)) return;
+    }
+  }
+
+  void _resetSourceAvailability(AnnotationProject? project) {
+    _sourceRefreshGeneration++;
+    _sourceAvailability = {
+      for (final image in project?.images ?? const <AnnotatedImage>[])
+        image.id: SourceAvailability.unknown,
+    };
+  }
+
   Future<void> _refreshLibraryEntryIfNeeded() async {
     final project = _project;
     if (project == null || _currentLibraryProjectId == null) {
@@ -1585,6 +1806,8 @@ class AppController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _projectEpoch++;
+    _sourceRefreshGeneration++;
     _classificationDebounce?.cancel();
     _classificationGeneration++;
     _classificationPending = false;

@@ -1,11 +1,14 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:bbox_labeler/annotation/models.dart';
 import 'package:bbox_labeler/detector/detector.dart';
+import 'package:bbox_labeler/project/source_relink_service.dart';
 import 'package:bbox_labeler/ui/app_controller.dart';
 import 'package:bbox_labeler/ui/workbench_copy.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
+import 'package:path/path.dart' as p;
 
 import '../support/fake_auto_box_runtime.dart';
 
@@ -207,6 +210,271 @@ void main() {
       expect(progress.errors, 1);
       expect(controller.lastUserMessage, WorkbenchCopy.importComplete(2, 1, 1));
     });
+
+    test('new images are immediately marked as available', () async {
+      final tempDir = await Directory.systemTemp.createTemp(
+        'bbox_controller_import_availability',
+      );
+      addTearDown(() => tempDir.delete(recursive: true));
+      final imagePath = p.join(tempDir.path, 'bread.png');
+      await _writePng(imagePath, width: 20, height: 10);
+      final controller = AppController()..createProject('demo');
+
+      await controller.addImageFiles([imagePath]);
+
+      final imageId = controller.project!.images.single.id;
+      expect(
+        controller.sourceAvailability[imageId],
+        SourceAvailability.available,
+      );
+      controller.removeImageFromProject(imageId);
+      expect(controller.sourceAvailability, isEmpty);
+    });
+  });
+
+  group('AppController source availability and relink', () {
+    test(
+      'refresh reports missing sources without changing image status',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_missing_source',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final controller = AppController()
+          ..loadProject(
+            _portableProject(
+              sourcePaths: [p.join(tempDir.path, 'missing', 'bread.png')],
+            ),
+          );
+
+        expect(
+          controller.selectedImageViewState,
+          SelectedImageViewState.unknown,
+        );
+
+        await controller.refreshSourceAvailability();
+
+        expect(controller.missingSourceCount, 1);
+        expect(
+          controller.selectedSourceAvailability,
+          SourceAvailability.missing,
+        );
+        expect(
+          controller.selectedImageViewState,
+          SelectedImageViewState.missing,
+        );
+        expect(controller.project!.images.single.status, ImageStatus.confirmed);
+      },
+    );
+
+    test(
+      'file relink preserves annotation state and does not add undo',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_file_relink',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final replacementPath = p.join(
+          tempDir.path,
+          'replacement',
+          'bread.png',
+        );
+        await _writePng(replacementPath, width: 32, height: 24);
+        final project = _portableProject(
+          sourcePaths: [p.join(tempDir.path, 'old', 'bread.png')],
+        );
+        final controller = AppController()..loadProject(project);
+        final originalImage = controller.project!.images.single;
+        final originalLabels = controller.project!.labels;
+        await controller.refreshSourceAvailability();
+
+        final result = await controller.relinkSourceFiles([replacementPath]);
+
+        final relinked = controller.project!.images.single;
+        expect(result.matchedCount, 1);
+        expect(relinked.sourcePath, File(replacementPath).absolute.path);
+        expect(relinked.importedFrom, File(replacementPath).parent.path);
+        expect(relinked.id, originalImage.id);
+        expect(relinked.status, ImageStatus.confirmed);
+        expect(relinked.boxes, same(originalImage.boxes));
+        expect(
+          relinked.boxes.single.automation,
+          same(originalImage.boxes.single.automation),
+        );
+        expect(controller.project!.labels, same(originalLabels));
+        expect(
+          controller.selectedSourceAvailability,
+          SourceAvailability.available,
+        );
+        expect(controller.canUndo, isFalse);
+      },
+    );
+
+    test(
+      'folder relink records the replacement root as importedFrom',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_folder_relink',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final originalRoot = p.join(tempDir.path, 'old-root');
+        final replacementRoot = p.join(tempDir.path, 'replacement-root');
+        final replacementPath = p.join(replacementRoot, 'batch', 'bread.png');
+        await _writePng(replacementPath, width: 32, height: 24);
+        final controller = AppController()
+          ..loadProject(
+            _portableProject(
+              sourcePaths: [p.join(originalRoot, 'batch', 'bread.png')],
+              importedFrom: originalRoot,
+            ),
+          );
+        await controller.refreshSourceAvailability();
+
+        final result = await controller.relinkSourceFolder(replacementRoot);
+
+        expect(result.matchedCount, 1);
+        expect(controller.project!.images.single.sourcePath, replacementPath);
+        expect(controller.project!.images.single.importedFrom, replacementRoot);
+        expect(controller.project!.images.single.status, ImageStatus.confirmed);
+      },
+    );
+
+    test(
+      'selected-file escape hatch resolves one of two ambiguous images',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_selected_relink',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final replacementPath = p.join(
+          tempDir.path,
+          'replacement',
+          'bread.png',
+        );
+        await _writePng(replacementPath, width: 32, height: 24);
+        final controller = AppController()
+          ..loadProject(
+            _portableProject(
+              sourcePaths: [
+                p.join(tempDir.path, 'old-a', 'bread.png'),
+                p.join(tempDir.path, 'old-b', 'bread.png'),
+              ],
+            ),
+          );
+        await controller.refreshSourceAvailability();
+
+        final ambiguous = await controller.relinkSourceFiles([replacementPath]);
+        expect(ambiguous.matchedCount, 0);
+        expect(ambiguous.ambiguousImageIds, {1, 2});
+
+        controller.selectImage(1);
+        final selected = await controller.relinkSelectedSourceFile(
+          replacementPath,
+        );
+
+        expect(selected.matchedCount, 1);
+        expect(selected.matchedPaths.keys, {1});
+        expect(controller.project!.images[0].sourcePath, replacementPath);
+        expect(
+          controller.project!.images[1].sourcePath,
+          p.join(tempDir.path, 'old-b', 'bread.png'),
+        );
+        expect(controller.sourceAvailability[1], SourceAvailability.available);
+        expect(controller.sourceAvailability[2], SourceAvailability.missing);
+      },
+    );
+
+    test(
+      'selected-file relink is a no-op unless selection is missing',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_selected_relink_noop',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final existingPath = p.join(tempDir.path, 'bread.png');
+        await _writePng(existingPath, width: 32, height: 24);
+        final controller = AppController()
+          ..loadProject(_portableProject(sourcePaths: [existingPath]));
+        await controller.refreshSourceAvailability();
+
+        final result = await controller.relinkSelectedSourceFile(existingPath);
+
+        expect(result.matchedCount, 0);
+        expect(result.unresolvedImageIds, isEmpty);
+        expect(result.ambiguousImageIds, isEmpty);
+        expect(controller.canUndo, isFalse);
+      },
+    );
+
+    test(
+      'undo and redo refresh source availability for restored paths',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_undo_availability',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final existingPath = p.join(tempDir.path, 'bread.png');
+        await _writePng(existingPath, width: 32, height: 24);
+        final controller = AppController()
+          ..loadProject(_portableProject(sourcePaths: [existingPath]));
+        await controller.refreshSourceAvailability();
+        controller.selectBox('box-1');
+        controller.deleteSelectedBox();
+        await File(existingPath).delete();
+
+        controller.undo();
+        await _waitForAvailability(controller, 1, SourceAvailability.missing);
+        expect(controller.sourceAvailability[1], SourceAvailability.missing);
+
+        await _writePng(existingPath, width: 32, height: 24);
+        controller.redo();
+        await _waitForAvailability(controller, 1, SourceAvailability.available);
+        expect(controller.sourceAvailability[1], SourceAvailability.available);
+      },
+    );
+
+    test(
+      'stale availability refresh cannot overwrite a newly loaded project',
+      () async {
+        final service = _DelayedInspectSourceRelinkService();
+        final controller = AppController(sourceRelinkService: service)
+          ..loadProject(_portableProject(sourcePaths: ['old.png']));
+
+        final refresh = controller.refreshSourceAvailability();
+        await service.started.future;
+        controller.loadProject(
+          _portableProject(sourcePaths: ['new.png'], firstImageId: 99),
+        );
+        service.complete({1: SourceAvailability.missing});
+        await refresh;
+
+        expect(controller.sourceAvailability, {99: SourceAvailability.unknown});
+        expect(controller.project!.images.single.id, 99);
+      },
+    );
+
+    test(
+      'stale availability refresh cannot reset a newly imported image',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_import_refresh_race',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final imagePath = p.join(tempDir.path, 'new.png');
+        await _writePng(imagePath, width: 32, height: 24);
+        final service = _DelayedInspectSourceRelinkService();
+        final controller = AppController(sourceRelinkService: service)
+          ..loadProject(_portableProject(sourcePaths: ['old.png']));
+
+        final refresh = controller.refreshSourceAvailability();
+        await service.started.future;
+        await controller.addImageFiles([imagePath]);
+        service.complete({1: SourceAvailability.missing});
+        await refresh;
+
+        expect(controller.sourceAvailability[2], SourceAvailability.available);
+      },
+    );
   });
 
   group('AppController box editing', () {
@@ -928,5 +1196,90 @@ class _RecordingDetector implements Detector {
     DetectionOptions options = const DetectionOptions(),
   }) {
     return onDetect(image, imagePath: imagePath, options: options);
+  }
+}
+
+AnnotationProject _portableProject({
+  required List<String> sourcePaths,
+  String? importedFrom,
+  int firstImageId = 1,
+}) {
+  const automation = BoxAutomationMetadata(
+    suggestedLabelId: 7,
+    candidates: [LabelCandidate(labelId: 7, score: 0.98)],
+    pipelineVersion: 'pipeline-v1',
+    policyVersion: 'policy-v1',
+    detectorSha256: 'detector-sha',
+  );
+  return AnnotationProject.empty(name: 'portable').copyWith(
+    labels: const [LabelClass(id: 7, name: 'Bread', color: 0xffff9800)],
+    images: [
+      for (var index = 0; index < sourcePaths.length; index++)
+        AnnotatedImage(
+          id: firstImageId + index,
+          sourcePath: sourcePaths[index],
+          displayName: 'bread.png',
+          importedFrom: importedFrom,
+          width: 32,
+          height: 24,
+          status: ImageStatus.confirmed,
+          boxes: const [
+            BoundingBox(
+              id: 'box-1',
+              x: 1,
+              y: 2,
+              width: 3,
+              height: 4,
+              status: BoxStatus.labeled,
+              labelId: 7,
+              labelSource: LabelSource.auto,
+              automation: automation,
+            ),
+          ],
+        ),
+    ],
+  );
+}
+
+Future<void> _writePng(
+  String path, {
+  required int width,
+  required int height,
+}) async {
+  final file = File(path);
+  await file.parent.create(recursive: true);
+  final image = img.Image(width: width, height: height);
+  img.fill(image, color: img.ColorRgb8(18, 28, 38));
+  await file.writeAsBytes(img.encodePng(image), flush: true);
+}
+
+Future<void> _waitForAvailability(
+  AppController controller,
+  int imageId,
+  SourceAvailability expected,
+) async {
+  for (var attempt = 0; attempt < 50; attempt++) {
+    if (controller.sourceAvailability[imageId] == expected) return;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  fail('Timed out waiting for $expected availability for image $imageId.');
+}
+
+class _DelayedInspectSourceRelinkService extends SourceRelinkService {
+  _DelayedInspectSourceRelinkService();
+
+  final started = Completer<void>();
+  final _completion = Completer<Map<int, SourceAvailability>>();
+
+  @override
+  Future<Map<int, SourceAvailability>> inspectSources(
+    Iterable<AnnotatedImage> images,
+  ) {
+    if (!started.isCompleted) started.complete();
+    return _completion.future;
+  }
+
+  void complete(Map<int, SourceAvailability> availability) {
+    _completion.complete(availability);
   }
 }
