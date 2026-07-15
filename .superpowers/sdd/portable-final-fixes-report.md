@@ -94,3 +94,38 @@ The following six pre-existing dirty files were never staged or modified by thes
 
 - The existing per-instance queue and cross-process limitation remain unchanged.
 - Repository-wide formatting still differs only in the protected unrelated installer test; no protected file was staged or modified by the re-review fixes.
+
+## Closure Fixes
+
+### Implemented
+
+- A successful temp-to-live index rename is now the index write commit point. Backup deletion and stale-backup cleanup occur after commit as best-effort work, so cleanup failure cannot make create, import, rename, or delete report failure after the new index is already live. Later queued writes tolerate and remove stale uniquely named backups.
+- Tombstone deletion is post-commit best-effort work. Rebuild skips every `.deleting-*` directory and retries cleanup without indexing it, preventing a logically deleted project from being resurrected when physical cleanup fails.
+- Library entries now share an exact ownership validator requiring normalized `<projectsRoot>/<entry.id>/project.bbox.json`. Open, rename, refresh, and delete reject cross-ID paths before reading or mutating either project directory; create/import and rebuild use the same canonical-path rule.
+- Default source candidate metadata now reads one `Uint8List`, decodes dimensions from those bytes, and computes SHA-256 with `sha256.convert(bytes)`. The injected byte-reader regression proves one read and byte-consistent dimensions/hash while preserving bounded candidate concurrency.
+
+### RED evidence
+
+- The closure regression set initially failed to compile because the post-promotion backup-delete, tombstone-delete, and candidate-byte-reader fault seams did not exist.
+- The new library cases cover all four index-mutating workflows, keep backup deletion failing for the entire first committed operation, and require the next operation on the same queue to remove the stale backup successfully.
+- The tombstone case injects recursive cleanup failure, then requires delete success, an empty rebuilt/listed index, a retained non-indexed tombstone, and a successful next create.
+- The cross-ID case corrupts one entry to point at another entry's exact in-root file and requires open, rename, refresh, and delete to throw without changing either project JSON, directory, or the corrupt index bytes.
+- The metadata case supplies valid PNG bytes for a nonexistent candidate path and requires one injected read plus a successful dimensions/hash match, which rules out a second disk stream.
+
+### GREEN evidence
+
+- Closure library + relink focused set: 41 tests passed.
+- Affected project/controller/home/transfer/integration set: 153 tests passed.
+- Fresh full Flutter suite: 521 tests passed.
+- `flutter analyze`: no issues found.
+- Targeted Dart format check: 4 files, 0 changes.
+- `git diff --check`: clean.
+
+### Closure commits
+
+- `0eb94be fix: finalize portable library durability`
+
+### Closure limitations
+
+- Serialization remains intentionally per `ProjectLibrary` instance; cross-process locking remains outside scope.
+- Repository-wide formatting still differs only in the protected unrelated installer test. All closure files are formatted, and none of the six protected dirty files was staged or modified.
