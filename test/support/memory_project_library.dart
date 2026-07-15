@@ -40,6 +40,21 @@ class MemoryProjectLibrary extends ProjectLibrary {
   }
 
   @override
+  Future<AnnotationProject> importProject(AnnotationProject source) async {
+    final id = _projects.containsKey(fixedId)
+        ? '$fixedId-${_projects.length + 1}'
+        : fixedId;
+    final projectFilePath = p.join(projectsRootPath, id, 'project.bbox.json');
+    final imported = source.copyWith(
+      projectFilePath: projectFilePath,
+      status: ProjectStatus.ready,
+    );
+    _projects[id] = imported;
+    _entries[id] = _entryFromProject(id, imported);
+    return imported;
+  }
+
+  @override
   Future<AnnotationProject> openProject(String id) async {
     final project = _projects[id];
     if (project == null) {

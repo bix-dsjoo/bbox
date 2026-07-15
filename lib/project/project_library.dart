@@ -120,6 +120,27 @@ class ProjectLibrary {
     return saved;
   }
 
+  Future<AnnotationProject> importProject(AnnotationProject source) async {
+    final timestamp = _clock().toUtc();
+    final id = await _uniqueProjectId(source.name, timestamp);
+    final targetPath = p.join(projectsRootPath, id, 'project.bbox.json');
+    final imported = source.copyWith(
+      projectFilePath: targetPath,
+      status: ProjectStatus.ready,
+    );
+    final saved = await ProjectStore.save(imported, targetPath);
+    try {
+      await refreshEntry(saved, createdAt: timestamp, updatedAt: timestamp);
+      return saved;
+    } catch (_) {
+      final directory = Directory(p.dirname(targetPath));
+      if (await directory.exists()) {
+        await directory.delete(recursive: true);
+      }
+      rethrow;
+    }
+  }
+
   Future<AnnotationProject> openProject(String id) async {
     final entries = await listProjects();
     final entry = entries.firstWhere(

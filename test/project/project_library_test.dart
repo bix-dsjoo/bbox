@@ -7,6 +7,8 @@ import 'package:bbox_labeler/project/project_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import '../support/memory_project_library.dart';
+
 void main() {
   group('ProjectLibrary', () {
     late Directory tempDir;
@@ -51,6 +53,64 @@ void main() {
       expect(entries.single.imageCount, 0);
       expect(entries.single.confirmedImageCount, 0);
       expect(entries.single.errorImageCount, 0);
+    });
+
+    test(
+      'imports a project into a new internal path without changing data',
+      () async {
+        final source = _externalProject(tempDir.path);
+
+        final imported = await library.importProject(source);
+
+        final expectedPath = p.join(
+          tempDir.path,
+          'projects',
+          'fixed-project',
+          'project.bbox.json',
+        );
+        expect(imported.projectFilePath, expectedPath);
+        expect(imported.status, ProjectStatus.ready);
+        expect(imported.labels.single.id, 23);
+        expect(imported.images.single.id, 41);
+        expect(
+          imported.images.single.sourcePath,
+          p.join(tempDir.path, 'outside', 'bread.jpg'),
+        );
+        expect(
+          imported.images.single.importedFrom,
+          p.join(tempDir.path, 'outside'),
+        );
+        expect(imported.images.single.boxes.single.id, 'annotation-71');
+        expect(imported.images.single.boxes.single.labelId, 23);
+        expect(
+          source.projectFilePath,
+          p.join(tempDir.path, 'outside-project.bbox.json'),
+        );
+        expect((await library.listProjects()).single.id, 'fixed-project');
+      },
+    );
+
+    test('memory library imports into a unique internal path', () async {
+      final memory = MemoryProjectLibrary(
+        rootPath: p.join(tempDir.path, 'memory-library'),
+        fixedId: 'memory-import',
+      );
+      final source = _externalProject(tempDir.path);
+
+      final first = await memory.importProject(source);
+      final second = await memory.importProject(source);
+
+      expect(
+        first.projectFilePath,
+        p.join(memory.projectsRootPath, 'memory-import', 'project.bbox.json'),
+      );
+      expect(
+        second.projectFilePath,
+        p.join(memory.projectsRootPath, 'memory-import-2', 'project.bbox.json'),
+      );
+      expect(first.images.single.id, 41);
+      expect(first.images.single.boxes.single.id, 'annotation-71');
+      expect(await memory.listProjects(), hasLength(2));
     });
 
     test('lists projects sorted by updatedAt descending', () async {
@@ -180,4 +240,37 @@ void main() {
       );
     });
   });
+}
+
+AnnotationProject _externalProject(String rootPath) {
+  final sourceDirectory = p.join(rootPath, 'outside');
+  return AnnotationProject(
+    schemaVersion: ProjectStore.currentSchemaVersion,
+    name: 'Imported Dataset',
+    projectFilePath: p.join(rootPath, 'outside-project.bbox.json'),
+    status: ProjectStatus.dirty,
+    labels: const [LabelClass(id: 23, name: 'Bread', color: 0xffff9800)],
+    images: [
+      AnnotatedImage(
+        id: 41,
+        sourcePath: p.join(sourceDirectory, 'bread.jpg'),
+        displayName: 'bread.jpg',
+        importedFrom: sourceDirectory,
+        width: 100,
+        height: 80,
+        status: ImageStatus.confirmed,
+        boxes: const [
+          BoundingBox(
+            id: 'annotation-71',
+            x: 1,
+            y: 2,
+            width: 30,
+            height: 40,
+            status: BoxStatus.labeled,
+            labelId: 23,
+          ),
+        ],
+      ),
+    ],
+  );
 }
