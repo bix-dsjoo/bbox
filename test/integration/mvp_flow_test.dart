@@ -42,6 +42,7 @@ void main() {
         ),
       ),
     );
+    addTearDown(controller.dispose);
     controller.createProject('demo');
     await controller.addImagesFromFolder(
       imageDir.path,
@@ -80,6 +81,7 @@ void main() {
     );
 
     final reloaded = AppController();
+    addTearDown(reloaded.dispose);
     await reloaded.openProject(projectPath);
 
     expect(reloaded.project!.name, 'demo');
@@ -122,6 +124,7 @@ void main() {
       projectLibrary: library,
       autoBoxRuntime: FakeAutoBoxRuntime(),
     );
+    addTearDown(controller.dispose);
 
     await controller.createLibraryProject('Library Demo');
     await controller.addImagesFromFolder(
@@ -133,6 +136,7 @@ void main() {
     await controller.saveProject();
 
     final freshController = AppController(projectLibrary: library);
+    addTearDown(freshController.dispose);
     await freshController.loadProjectLibrary();
 
     expect(freshController.projectLibraryEntries.single.id, 'flow-project');
