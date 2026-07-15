@@ -1,5 +1,94 @@
 part of 'workbench_screen.dart';
 
+class _MissingSourceBanner extends StatelessWidget {
+  const _MissingSourceBanner({
+    required this.count,
+    required this.busy,
+    required this.onRelinkFiles,
+    required this.onRelinkFolder,
+  });
+
+  final int count;
+  final bool busy;
+  final VoidCallback onRelinkFiles;
+  final VoidCallback onRelinkFolder;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      child: Container(
+        key: const ValueKey('missing-source-banner'),
+        width: double.infinity,
+        decoration: BoxDecoration(
+          color: colorScheme.errorContainer,
+          border: Border(
+            bottom: BorderSide(color: colorScheme.error.withValues(alpha: 0.4)),
+          ),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          children: [
+            Icon(
+              Icons.link_off_outlined,
+              size: 20,
+              color: colorScheme.onErrorContainer,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    WorkbenchCopy.missingSourceCount(count),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: colorScheme.onErrorContainer,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  Text(
+                    WorkbenchCopy.labelingDataPreserved,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: colorScheme.onErrorContainer,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Tooltip(
+              message: WorkbenchCopy.relinkFiles,
+              child: OutlinedButton.icon(
+                key: const ValueKey('relink-source-files'),
+                onPressed: busy ? null : onRelinkFiles,
+                icon: const Icon(Icons.insert_drive_file_outlined, size: 18),
+                label: const Text(WorkbenchCopy.relinkFiles),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Tooltip(
+              message: WorkbenchCopy.relinkFolder,
+              child: OutlinedButton.icon(
+                key: const ValueKey('relink-source-folder'),
+                onPressed: busy ? null : onRelinkFolder,
+                icon: const Icon(Icons.folder_open_outlined, size: 18),
+                label: const Text(WorkbenchCopy.relinkFolder),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _WorkbenchActivityBar extends StatelessWidget {
   const _WorkbenchActivityBar({required this.controller});
 
@@ -88,6 +177,20 @@ class _ActivityLeadingIcon extends StatelessWidget {
       color: Theme.of(context).colorScheme.onSurfaceVariant,
     );
   }
+}
+
+void _showRelinkSummary(BuildContext context, SourceRelinkResult result) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(
+        WorkbenchCopy.relinkSummary(
+          matched: result.matchedCount,
+          unresolved: result.unresolvedImageIds.length,
+          ambiguous: result.ambiguousImageIds.length,
+        ),
+      ),
+    ),
+  );
 }
 
 String _importProgressText(ImageImportProgress progress) {

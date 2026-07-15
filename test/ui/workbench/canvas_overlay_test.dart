@@ -581,5 +581,42 @@ void main() {
         findsOneWidget,
       );
     });
+
+    testWidgets(
+      'missing selected source shows its path while preserving the inspector',
+      (tester) async {
+        final tempDir = Directory.systemTemp.createTempSync(
+          'bbox_missing_viewer',
+        );
+        addTearDown(() => tempDir.deleteSync(recursive: true));
+        final missingPath = '${tempDir.path}${Platform.pathSeparator}gone.png';
+        final missingProject = project().copyWith(
+          images: [
+            project().images.first.copyWith(
+              sourcePath: missingPath,
+              status: ImageStatus.confirmed,
+            ),
+            project().images.last,
+          ],
+        );
+        final controller = AppController()..loadProject(missingProject);
+        addTearDown(controller.dispose);
+        await tester.runAsync(controller.refreshSourceAvailability);
+
+        await tester.pumpWidget(app(controller));
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('missing-selected-source')),
+          findsOneWidget,
+        );
+        expect(find.text(missingPath), findsOneWidget);
+        expect(find.text('라벨링 데이터는 보존되어 있습니다.'), findsWidgets);
+        expect(find.byKey(const ValueKey('image-canvas')), findsNothing);
+        expect(find.byKey(const ValueKey('inspector-panel')), findsOneWidget);
+        expect(find.textContaining('#1'), findsWidgets);
+        expect(controller.project!.images.first.status, ImageStatus.confirmed);
+      },
+    );
   });
 }

@@ -10,6 +10,7 @@ import '../../annotation/annotation_rules.dart';
 import '../../annotation/box_display_order.dart';
 import '../../annotation/models.dart';
 import '../../detector/auto_box_service.dart';
+import '../../project/source_relink_service.dart';
 import '../../viewer/viewport_transform.dart';
 import '../app_controller.dart';
 import '../app_theme.dart';
@@ -321,6 +322,15 @@ class WorkbenchScreen extends StatelessWidget {
                     _handleWorkbenchKey(event, project),
                 child: Column(
                   children: [
+                    if (controller.missingSourceCount > 0)
+                      _MissingSourceBanner(
+                        count: controller.missingSourceCount,
+                        busy:
+                            controller.projectActivity ==
+                            ProjectActivity.validating,
+                        onRelinkFiles: () => _relinkSourceFiles(context),
+                        onRelinkFolder: () => _relinkSourceFolder(context),
+                      ),
                     Expanded(
                       child: LayoutBuilder(
                         builder: (context, constraints) {
@@ -420,6 +430,45 @@ class WorkbenchScreen extends StatelessWidget {
     } catch (error) {
       if (context.mounted) {
         _showError(context, '이미지 파일을 가져오지 못했습니다. $error');
+      }
+    }
+  }
+
+  Future<void> _relinkSourceFiles(BuildContext context) async {
+    try {
+      final paths = await imageImportPicker.pickImageFiles();
+      if (paths.isEmpty) {
+        return;
+      }
+      final result =
+          paths.length == 1 &&
+              controller.selectedSourceAvailability ==
+                  SourceAvailability.missing
+          ? await controller.relinkSelectedSourceFile(paths.single)
+          : await controller.relinkSourceFiles(paths);
+      if (context.mounted) {
+        _showRelinkSummary(context, result);
+      }
+    } catch (error) {
+      if (context.mounted) {
+        _showError(context, WorkbenchCopy.relinkFilesFailed(error));
+      }
+    }
+  }
+
+  Future<void> _relinkSourceFolder(BuildContext context) async {
+    try {
+      final path = await imageImportPicker.pickImageFolder();
+      if (path == null) {
+        return;
+      }
+      final result = await controller.relinkSourceFolder(path);
+      if (context.mounted) {
+        _showRelinkSummary(context, result);
+      }
+    } catch (error) {
+      if (context.mounted) {
+        _showError(context, WorkbenchCopy.relinkFolderFailed(error));
       }
     }
   }

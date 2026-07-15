@@ -350,5 +350,245 @@ void main() {
       expect(find.byKey(const ValueKey('image-import-progress')), findsNothing);
       expect(find.byKey(const ValueKey('auto-boxes-feedback')), findsNothing);
     });
+
+    testWidgets(
+      'missing source banner reconnects only the selected image from one file',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1280, 720));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final tempDir = Directory.systemTemp.createTempSync(
+          'bbox_relink_selected_file',
+        );
+        addTearDown(() => tempDir.deleteSync(recursive: true));
+        final replacementPath = '${tempDir.path}${Platform.pathSeparator}a.jpg';
+        File(
+          replacementPath,
+        ).writeAsBytesSync(img.encodeJpg(fixtureImage(100, 80)));
+        final missingPath =
+            '${tempDir.path}${Platform.pathSeparator}missing'
+            '${Platform.pathSeparator}a.jpg';
+        final otherMissingPath =
+            '${tempDir.path}${Platform.pathSeparator}other'
+            '${Platform.pathSeparator}a.jpg';
+        final missingProject = project().copyWith(
+          images: [
+            project().images.first.copyWith(
+              sourcePath: missingPath,
+              displayName: 'a.jpg',
+              status: ImageStatus.confirmed,
+            ),
+            project().images.last.copyWith(
+              sourcePath: otherMissingPath,
+              displayName: 'a.jpg',
+            ),
+          ],
+        );
+        final controller = AppController()..loadProject(missingProject);
+        addTearDown(controller.dispose);
+        await tester.runAsync(controller.refreshSourceAvailability);
+        var filePickerCalls = 0;
+
+        await tester.pumpWidget(
+          app(
+            controller,
+            imageImportPicker: FakeImageImportPicker(
+              filePaths: [replacementPath],
+              onPickFiles: () => filePickerCalls += 1,
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('missing-source-banner')),
+          findsOneWidget,
+        );
+        expect(find.text('원본 이미지 2개를 찾을 수 없습니다'), findsOneWidget);
+        expect(find.text('라벨링 데이터는 보존되어 있습니다.'), findsWidgets);
+        expect(
+          find.byKey(const ValueKey('relink-source-files')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('relink-source-folder')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('missing-selected-source')),
+          findsOneWidget,
+        );
+        expect(controller.project!.images.first.status, ImageStatus.confirmed);
+        expect(tester.takeException(), isNull);
+
+        await tester.runAsync(() async {
+          await tester.tap(find.byKey(const ValueKey('relink-source-files')));
+          for (var attempt = 0; attempt < 100; attempt += 1) {
+            if (controller.project!.images.first.sourcePath ==
+                    replacementPath &&
+                controller.projectActivity == ProjectActivity.idle) {
+              await Future<void>.delayed(const Duration(milliseconds: 50));
+              return;
+            }
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+          }
+        });
+        await tester.pumpAndSettle();
+
+        expect(filePickerCalls, 1);
+        expect(controller.project!.images.first.sourcePath, replacementPath);
+        expect(controller.project!.images.last.sourcePath, otherMissingPath);
+        expect(controller.project!.images.first.status, ImageStatus.confirmed);
+        expect(find.text('1개 연결 · 0개 미해결 · 0개 중복 후보'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('missing-selected-source')),
+          findsNothing,
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets('missing source banner reconnects images from a folder', (
+      tester,
+    ) async {
+      final tempDir = Directory.systemTemp.createTempSync('bbox_relink_folder');
+      addTearDown(() => tempDir.deleteSync(recursive: true));
+      final replacementPath =
+          '${tempDir.path}${Platform.pathSeparator}empty.jpg';
+      File(
+        replacementPath,
+      ).writeAsBytesSync(img.encodeJpg(fixtureImage(100, 80)));
+      final missingPath =
+          '${tempDir.path}${Platform.pathSeparator}missing'
+          '${Platform.pathSeparator}empty.jpg';
+      final missingProject = project().copyWith(
+        images: [
+          project().images.last.copyWith(
+            sourcePath: missingPath,
+            status: ImageStatus.confirmed,
+          ),
+        ],
+      );
+      final controller = AppController()..loadProject(missingProject);
+      addTearDown(controller.dispose);
+      await tester.runAsync(controller.refreshSourceAvailability);
+      var folderPickerCalls = 0;
+
+      await tester.pumpWidget(
+        app(
+          controller,
+          imageImportPicker: FakeImageImportPicker(
+            folderPath: tempDir.path,
+            onPickFolder: () => folderPickerCalls += 1,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('원본 이미지 1개를 찾을 수 없습니다'), findsOneWidget);
+      await tester.runAsync(() async {
+        await tester.tap(find.byKey(const ValueKey('relink-source-folder')));
+        for (var attempt = 0; attempt < 100; attempt += 1) {
+          if (controller.project!.images.single.sourcePath == replacementPath &&
+              controller.projectActivity == ProjectActivity.idle) {
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+            return;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+      });
+      await tester.pumpAndSettle();
+
+      expect(folderPickerCalls, 1);
+      expect(controller.project!.images.single.sourcePath, replacementPath);
+      expect(controller.project!.images.single.status, ImageStatus.confirmed);
+      expect(find.text('1개 연결 · 0개 미해결 · 0개 중복 후보'), findsOneWidget);
+      expect(find.byKey(const ValueKey('missing-source-banner')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('missing-selected-source')),
+        findsNothing,
+      );
+    });
+
+    testWidgets(
+      'reconnect cancellation changes nothing and only validation disables actions',
+      (tester) async {
+        final tempDir = Directory.systemTemp.createTempSync(
+          'bbox_relink_cancel',
+        );
+        addTearDown(() => tempDir.deleteSync(recursive: true));
+        final missingPath =
+            '${tempDir.path}${Platform.pathSeparator}missing.jpg';
+        final controller = AppController()
+          ..loadProject(
+            project().copyWith(
+              images: [
+                project().images.first.copyWith(sourcePath: missingPath),
+              ],
+            ),
+          );
+        addTearDown(controller.dispose);
+        await tester.runAsync(controller.refreshSourceAvailability);
+        var filePickerCalls = 0;
+        var folderPickerCalls = 0;
+
+        await tester.pumpWidget(
+          app(
+            controller,
+            imageImportPicker: FakeImageImportPicker(
+              onPickFiles: () => filePickerCalls += 1,
+              onPickFolder: () => folderPickerCalls += 1,
+            ),
+          ),
+        );
+
+        controller.debugSetProjectActivityForTest(ProjectActivity.validating);
+        await tester.pump();
+        expect(
+          tester
+              .widget<OutlinedButton>(
+                find.byKey(const ValueKey('relink-source-files')),
+              )
+              .onPressed,
+          isNull,
+        );
+        expect(
+          tester
+              .widget<OutlinedButton>(
+                find.byKey(const ValueKey('relink-source-folder')),
+              )
+              .onPressed,
+          isNull,
+        );
+
+        controller.debugSetProjectActivityForTest(ProjectActivity.importing);
+        await tester.pump();
+        expect(
+          tester
+              .widget<OutlinedButton>(
+                find.byKey(const ValueKey('relink-source-files')),
+              )
+              .onPressed,
+          isNotNull,
+        );
+        expect(
+          tester
+              .widget<OutlinedButton>(
+                find.byKey(const ValueKey('relink-source-folder')),
+              )
+              .onPressed,
+          isNotNull,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('relink-source-files')));
+        await tester.pump();
+        await tester.tap(find.byKey(const ValueKey('relink-source-folder')));
+        await tester.pump();
+
+        expect(filePickerCalls, 1);
+        expect(folderPickerCalls, 1);
+        expect(controller.project!.images.single.sourcePath, missingPath);
+        expect(find.byType(SnackBar), findsNothing);
+      },
+    );
   });
 }

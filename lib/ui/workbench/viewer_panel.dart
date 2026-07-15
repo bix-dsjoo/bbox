@@ -89,6 +89,10 @@ class _ViewerPanelState extends State<_ViewerPanel> {
     final controller = widget.controller;
     final colorScheme = Theme.of(context).colorScheme;
 
+    if (controller.selectedSourceAvailability == SourceAvailability.missing) {
+      return _MissingSelectedSource(sourcePath: image.sourcePath);
+    }
+
     if (controller.imageViewLoadState.isLoading &&
         controller.imageViewLoadState.imageId == image.id) {
       return const Center(
@@ -231,5 +235,51 @@ class _ViewerPanelState extends State<_ViewerPanel> {
         focusContext.findAncestorWidgetOfExactType<EditableText>() != null ||
         focusContext.findAncestorWidgetOfExactType<TextField>() != null ||
         focusContext.findAncestorWidgetOfExactType<TextFormField>() != null;
+  }
+}
+
+class _MissingSelectedSource extends StatelessWidget {
+  const _MissingSelectedSource({required this.sourcePath});
+
+  final String sourcePath;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Center(
+      key: const ValueKey('missing-selected-source'),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520),
+        child: Semantics(
+          container: true,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.image_not_supported_outlined,
+                size: 36,
+                color: colorScheme.onSurfaceVariant,
+              ),
+              const SizedBox(height: 12),
+              SelectableText(
+                sourcePath,
+                textAlign: TextAlign.center,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                WorkbenchCopy.labelingDataPreserved,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

@@ -6,6 +6,25 @@ class WorkbenchCopy {
   static const autoBoxesShortcut = 'Ctrl+B';
   static const completeAndNextShortcut = 'Ctrl+Enter';
 
+  static String missingSourceCount(int count) =>
+      '원본 이미지 $count'
+      '개를 찾을 수 없습니다';
+  static const labelingDataPreserved = '라벨링 데이터는 보존되어 있습니다.';
+  static const relinkFiles = '파일로 다시 연결';
+  static const relinkFolder = '폴더로 다시 연결';
+
+  static String relinkSummary({
+    required int matched,
+    required int unresolved,
+    required int ambiguous,
+  }) => '$matched개 연결 · $unresolved개 미해결 · $ambiguous개 중복 후보';
+
+  static String relinkFilesFailed(Object error) =>
+      '파일을 다시 연결하지 못했습니다. 선택한 파일을 확인한 뒤 다시 시도하세요. $error';
+
+  static String relinkFolderFailed(Object error) =>
+      '폴더를 다시 연결하지 못했습니다. 폴더 접근 권한과 파일 위치를 확인한 뒤 다시 시도하세요. $error';
+
   static const activityReady = '준비됨';
   static const automationEditingLocked = '자동 작업 중: 편집 잠김';
 

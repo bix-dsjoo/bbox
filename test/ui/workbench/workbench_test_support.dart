@@ -92,9 +92,16 @@ class FakeCocoExportDestinationPicker extends CocoExportDestinationPicker {
 }
 
 class FakeImageImportPicker extends ImageImportPicker {
-  const FakeImageImportPicker({this.folderPath, this.onPickFolder});
+  const FakeImageImportPicker({
+    this.folderPath,
+    this.filePaths = const [],
+    this.onPickFolder,
+    this.onPickFiles,
+  });
   final String? folderPath;
+  final List<String> filePaths;
   final VoidCallback? onPickFolder;
+  final VoidCallback? onPickFiles;
   @override
   Future<String?> pickImageFolder() {
     onPickFolder?.call();
@@ -102,7 +109,10 @@ class FakeImageImportPicker extends ImageImportPicker {
   }
 
   @override
-  Future<List<String>> pickImageFiles() => SynchronousFuture(const []);
+  Future<List<String>> pickImageFiles() {
+    onPickFiles?.call();
+    return SynchronousFuture(filePaths);
+  }
 }
 
 Future<void> tapVisible(WidgetTester tester, Finder finder) async {
