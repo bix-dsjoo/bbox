@@ -10,6 +10,7 @@ import '../annotation/default_labels.dart';
 import '../annotation/label_shortcut_migration.dart';
 import '../annotation/models.dart';
 import '../detector/auto_box_service.dart';
+import '../detector/box_label_cache.dart';
 import '../detector/bread_worker_client.dart';
 import '../detector/detector.dart';
 import '../detector/worker_protocol.dart';
@@ -54,13 +55,16 @@ class AppController extends ChangeNotifier {
   AppController({
     ProjectLibrary? projectLibrary,
     AutoBoxRuntime? autoBoxRuntime,
+    BoxLabelCache? boxLabelCache,
   }) : _projectLibrary = projectLibrary ?? ProjectLibrary.appData(),
-       _autoBoxRuntime = autoBoxRuntime ?? defaultAutoBoxService() {
+       _autoBoxRuntime = autoBoxRuntime ?? defaultAutoBoxService(),
+       _boxLabelCache = boxLabelCache ?? BoxLabelCache() {
     _autoBoxRuntime.addListener(_handleAutoBoxRuntimeChanged);
   }
 
   final ProjectLibrary _projectLibrary;
   final AutoBoxRuntime _autoBoxRuntime;
+  final BoxLabelCache _boxLabelCache;
 
   AnnotationProject? _project;
   int? _selectedImageId;
@@ -79,6 +83,9 @@ class AppController extends ChangeNotifier {
   int _projectEpoch = 0;
   int _nextAutoBoxRequestToken = 0;
   int? _activeAutoBoxRequestToken;
+  Timer? _classificationDebounce;
+  int _classificationGeneration = 0;
+  final Map<int, String> _pipelineVersionsByImageId = {};
 
   final List<AnnotationProject> _undoStack = [];
   final List<AnnotationProject> _redoStack = [];
@@ -562,6 +569,7 @@ class AppController extends ChangeNotifier {
     _selectedBoxId = box.id;
     _scheduleAutoSave();
     notifyListeners();
+    scheduleSelectedBoxClassification();
   }
 
   void moveSelectedBox(double dx, double dy) {
@@ -717,6 +725,15 @@ class AppController extends ChangeNotifier {
       _undoStack.add(previousProject);
       _redoStack.clear();
       _project = previousProject;
+      final previousHash = previousImage.contentSha256;
+      if (previousHash != null &&
+          result.imageSha256 != null &&
+          previousHash != result.imageSha256) {
+        _boxLabelCache.invalidateImage(previousHash);
+      }
+      if (result.pipelineVersion case final pipelineVersion?) {
+        _pipelineVersionsByImageId[previousImage.id] = pipelineVersion;
+      }
       final detectedBoxes = _normalizeDetectionLabelIds(project, result.boxes);
       final updated = previousImage.copyWith(
         status: ImageStatus.needsReview,
@@ -776,6 +793,185 @@ class AppController extends ChangeNotifier {
         image,
         boxId: boxId,
       ).copyWith(status: ImageStatus.needsReview),
+    );
+    _scheduleAutoSave();
+    notifyListeners();
+  }
+
+  void scheduleSelectedBoxClassification({String? pipelineVersion}) {
+    final image = selectedImage;
+    final box = selectedBox;
+    if (image == null || box == null || box.isDeleted) {
+      return;
+    }
+    _classificationDebounce?.cancel();
+    final generation = ++_classificationGeneration;
+    final projectEpoch = _projectEpoch;
+    final imageId = image.id;
+    final boxId = box.id;
+    final resolvedPipelineVersion =
+        pipelineVersion ??
+        box.automation?.pipelineVersion ??
+        _pipelineVersionsByImageId[imageId] ??
+        '';
+    if (image.contentSha256 == null && resolvedPipelineVersion.isEmpty) {
+      return;
+    }
+    _classificationDebounce = Timer(
+      const Duration(milliseconds: 250),
+      () => unawaited(
+        _classifyEditedBox(
+          generation: generation,
+          projectEpoch: projectEpoch,
+          imageId: imageId,
+          boxId: boxId,
+          x: box.x,
+          y: box.y,
+          width: box.width,
+          height: box.height,
+          pipelineVersion: resolvedPipelineVersion,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _classifyEditedBox({
+    required int generation,
+    required int projectEpoch,
+    required int imageId,
+    required String boxId,
+    required double x,
+    required double y,
+    required double width,
+    required double height,
+    required String pipelineVersion,
+  }) async {
+    if (generation != _classificationGeneration ||
+        projectEpoch != _projectEpoch) {
+      return;
+    }
+    final image = _imageById(imageId);
+    final box = _boxById(image, boxId);
+    if (image == null ||
+        box == null ||
+        !_sameGeometry(box, x, y, width, height)) {
+      return;
+    }
+
+    final imageHash = image.contentSha256;
+    final cacheKey = imageHash == null || pipelineVersion.isEmpty
+        ? null
+        : BoxLabelCacheKey(
+            imageSha256: imageHash,
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            pipelineVersion: pipelineVersion,
+          );
+    final cached = cacheKey == null ? null : _boxLabelCache.getEntry(cacheKey);
+    if (cached != null) {
+      _applyClassificationDecision(
+        image: image,
+        box: cached.applyTo(box),
+        generation: generation,
+        projectEpoch: projectEpoch,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+      );
+      return;
+    }
+
+    try {
+      final result = await _autoBoxRuntime.classifyBoxes(image, [box]);
+      if (generation != _classificationGeneration ||
+          projectEpoch != _projectEpoch) {
+        return;
+      }
+      final currentImage = _imageById(imageId);
+      final currentBox = _boxById(currentImage, boxId);
+      if (currentImage == null ||
+          currentBox == null ||
+          !_sameGeometry(currentBox, x, y, width, height) ||
+          result.boxes.isEmpty) {
+        return;
+      }
+      final responseBox = result.boxes.firstWhere(
+        (candidate) => candidate.id == boxId,
+        orElse: () => result.boxes.single,
+      );
+      final project = _project!;
+      final normalized = _normalizeDetectionLabelIds(project, [
+        responseBox,
+      ]).single.copyWith(id: boxId, x: x, y: y, width: width, height: height);
+      final resultPipeline = result.pipelineVersion ?? pipelineVersion;
+      if (resultPipeline.isNotEmpty) {
+        _pipelineVersionsByImageId[imageId] = resultPipeline;
+      }
+      final resultHash = result.imageSha256 ?? currentImage.contentSha256;
+      if (currentImage.contentSha256 != null &&
+          resultHash != null &&
+          currentImage.contentSha256 != resultHash) {
+        _boxLabelCache.invalidateImage(currentImage.contentSha256!);
+      }
+      final resultKey = resultHash == null || resultPipeline.isEmpty
+          ? null
+          : BoxLabelCacheKey(
+              imageSha256: resultHash,
+              x: x,
+              y: y,
+              width: width,
+              height: height,
+              pipelineVersion: resultPipeline,
+            );
+      if (resultKey != null &&
+          (normalized.isAutoLabeled || normalized.requiresLabelReview)) {
+        _boxLabelCache.putBox(resultKey, normalized);
+      }
+      _applyClassificationDecision(
+        image: currentImage.copyWith(contentSha256: resultHash),
+        box: normalized,
+        generation: generation,
+        projectEpoch: projectEpoch,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+      );
+    } catch (_) {
+      // A failed refresh leaves the box as an explicit gray proposal.
+    }
+  }
+
+  void _applyClassificationDecision({
+    required AnnotatedImage image,
+    required BoundingBox box,
+    required int generation,
+    required int projectEpoch,
+    required double x,
+    required double y,
+    required double width,
+    required double height,
+  }) {
+    final currentImage = _imageById(image.id);
+    final currentBox = _boxById(currentImage, box.id);
+    if (generation != _classificationGeneration ||
+        projectEpoch != _projectEpoch ||
+        currentImage == null ||
+        currentBox == null ||
+        !_sameGeometry(currentBox, x, y, width, height)) {
+      return;
+    }
+    _replaceSelectedImage(
+      image.copyWith(
+        status: ImageStatus.needsReview,
+        boxes: [
+          for (final existing in image.boxes)
+            if (existing.id == box.id) box else existing,
+        ],
+      ),
     );
     _scheduleAutoSave();
     notifyListeners();
@@ -915,6 +1111,8 @@ class AppController extends ChangeNotifier {
     if (_undoStack.isEmpty || _project == null) {
       return;
     }
+    _classificationDebounce?.cancel();
+    _classificationGeneration++;
     _redoStack.add(_project!);
     _project = _undoStack.removeLast();
     _repairSelection();
@@ -925,6 +1123,8 @@ class AppController extends ChangeNotifier {
     if (_redoStack.isEmpty || _project == null) {
       return;
     }
+    _classificationDebounce?.cancel();
+    _classificationGeneration++;
     _undoStack.add(_project!);
     _project = _redoStack.removeLast();
     _repairSelection();
@@ -1143,6 +1343,44 @@ class AppController extends ChangeNotifier {
         image.visibleBoxes.any(_boxNeedsLabel);
   }
 
+  AnnotatedImage? _imageById(int imageId) {
+    final project = _project;
+    if (project == null) {
+      return null;
+    }
+    for (final image in project.images) {
+      if (image.id == imageId) {
+        return image;
+      }
+    }
+    return null;
+  }
+
+  BoundingBox? _boxById(AnnotatedImage? image, String boxId) {
+    if (image == null) {
+      return null;
+    }
+    for (final box in image.visibleBoxes) {
+      if (box.id == boxId) {
+        return box;
+      }
+    }
+    return null;
+  }
+
+  bool _sameGeometry(
+    BoundingBox box,
+    double x,
+    double y,
+    double width,
+    double height,
+  ) {
+    return box.x == x &&
+        box.y == y &&
+        box.width == width &&
+        box.height == height;
+  }
+
   bool _boxNeedsLabel(BoundingBox box) {
     return !box.isDeleted &&
         (box.status != BoxStatus.labeled || box.labelId == null);
@@ -1235,7 +1473,21 @@ class AppController extends ChangeNotifier {
       return;
     }
     _recordUndo();
-    final updatedBox = edit(image, box);
+    final pipelineVersion =
+        box.automation?.pipelineVersion ?? _pipelineVersionsByImageId[image.id];
+    final editedBox = edit(image, box);
+    final shouldReclassify =
+        box.labelSource == LabelSource.auto ||
+        box.automation != null ||
+        (box.status == BoxStatus.proposal && box.labelId == null);
+    final updatedBox = shouldReclassify
+        ? editedBox.copyWith(
+            status: BoxStatus.proposal,
+            labelId: null,
+            labelSource: null,
+            automation: null,
+          )
+        : editedBox;
     _replaceSelectedImage(
       image.copyWith(
         status: ImageStatus.needsReview,
@@ -1247,6 +1499,9 @@ class AppController extends ChangeNotifier {
     );
     _scheduleAutoSave();
     notifyListeners();
+    if (shouldReclassify) {
+      scheduleSelectedBoxClassification(pipelineVersion: pipelineVersion);
+    }
   }
 
   void _scheduleAutoSave() {
@@ -1313,6 +1568,8 @@ class AppController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _classificationDebounce?.cancel();
+    _classificationGeneration++;
     _autoBoxRuntime.removeListener(_handleAutoBoxRuntimeChanged);
     unawaited(_autoBoxRuntime.shutdown());
     super.dispose();

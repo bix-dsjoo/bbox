@@ -108,6 +108,94 @@ void main() {
     expect(controller.canUndo, isTrue);
   });
 
+  test('editing an auto-labeled box makes it gray immediately', () {
+    final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+      ..loadProject(_autoLabeledProject())
+      ..selectBox('auto-box');
+    addTearDown(controller.dispose);
+
+    controller.setSelectedBoxGeometry(x: 20, y: 20, width: 30, height: 30);
+
+    expect(controller.selectedBox!.status, BoxStatus.proposal);
+    expect(controller.selectedBox!.labelId, isNull);
+    expect(controller.selectedBox!.labelSource, isNull);
+    expect(controller.selectedBox!.automation, isNull);
+  });
+
+  test('rapid geometry edits produce one classify request', () async {
+    final runtime = FakeAutoBoxRuntime();
+    final controller = AppController(autoBoxRuntime: runtime)
+      ..loadProject(_autoLabeledProject())
+      ..selectBox('auto-box');
+    addTearDown(controller.dispose);
+
+    controller.moveSelectedBox(1, 0);
+    controller.moveSelectedBox(1, 0);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(runtime.classifyCount, 1);
+  });
+
+  test('edited box applies a validated automatic classification', () async {
+    final runtime = FakeAutoBoxRuntime(
+      detectionResult: _acceptedClassificationResult(x: 11),
+    );
+    final controller = AppController(autoBoxRuntime: runtime)
+      ..loadProject(_autoLabeledProject())
+      ..selectBox('auto-box');
+    addTearDown(controller.dispose);
+
+    controller.moveSelectedBox(1, 0);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(controller.selectedBox!.status, BoxStatus.labeled);
+    expect(controller.selectedBox!.labelId, 1);
+    expect(controller.selectedBox!.labelSource, LabelSource.auto);
+    expect(controller.selectedBox!.x, 11);
+  });
+
+  test(
+    'returning to cached geometry avoids another classify request',
+    () async {
+      final runtime = FakeAutoBoxRuntime(
+        detectionResult: _acceptedClassificationResult(x: 11),
+      );
+      final controller = AppController(autoBoxRuntime: runtime)
+        ..loadProject(_autoLabeledProject())
+        ..selectBox('auto-box');
+      addTearDown(controller.dispose);
+
+      controller.moveSelectedBox(1, 0);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      controller.setSelectedBoxGeometry(x: 10, y: 10, width: 20, height: 20);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      controller.setSelectedBoxGeometry(x: 11, y: 10, width: 20, height: 20);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+
+      expect(runtime.classifyCount, 2);
+      expect(controller.selectedBox!.isAutoLabeled, isTrue);
+    },
+  );
+
+  test('new manual box is classified after drawing completes', () async {
+    final runtime = FakeAutoBoxRuntime();
+    final sourceProject = _project();
+    final controller = AppController(autoBoxRuntime: runtime)
+      ..loadProject(
+        sourceProject.copyWith(
+          images: [
+            sourceProject.images.first.copyWith(contentSha256: 'image-hash'),
+          ],
+        ),
+      );
+    addTearDown(controller.dispose);
+
+    controller.addBox(x: 10, y: 12, width: 20, height: 24);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(runtime.classifyCount, 1);
+  });
+
   test('failed service remains manually retryable', () async {
     final runtime = FakeAutoBoxRuntime(
       state: AutoBoxState.failed,
@@ -658,6 +746,32 @@ DetectionResult _oneBoxResult(String id) {
   );
 }
 
+DetectionResult _acceptedClassificationResult({required double x}) {
+  return DetectionResult(
+    detectorName: 'fake-auto-box-runtime',
+    imageSha256: 'image-hash',
+    pipelineVersion: 'test-v1',
+    boxes: [
+      BoundingBox(
+        id: 'auto-box',
+        x: x,
+        y: 10,
+        width: 20,
+        height: 20,
+        status: BoxStatus.labeled,
+        labelId: 1,
+        labelSource: LabelSource.auto,
+        automation: const BoxAutomationMetadata(
+          candidates: [LabelCandidate(labelId: 1, score: 0.96)],
+          pipelineVersion: 'test-v1',
+          policyVersion: 'test-policy-v1',
+          detectorSha256: 'detector-hash',
+        ),
+      ),
+    ],
+  );
+}
+
 AnnotationProject _project({String name = 'demo'}) {
   return AnnotationProject.empty(name: name).copyWith(
     images: const [
@@ -746,6 +860,41 @@ AnnotationProject _confirmedProject() {
             height: 22,
             status: BoxStatus.labeled,
             labelId: 1,
+          ),
+        ],
+      ),
+    ],
+  );
+}
+
+AnnotationProject _autoLabeledProject() {
+  return AnnotationProject.empty(name: 'auto-labeled').copyWith(
+    labels: const [LabelClass(id: 1, name: 'Bread', color: 0xFFAA5500)],
+    images: const [
+      AnnotatedImage(
+        id: 1,
+        sourcePath: 'a.jpg',
+        displayName: 'a.jpg',
+        width: 100,
+        height: 80,
+        status: ImageStatus.needsReview,
+        contentSha256: 'image-hash',
+        boxes: [
+          BoundingBox(
+            id: 'auto-box',
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 20,
+            status: BoxStatus.labeled,
+            labelId: 1,
+            labelSource: LabelSource.auto,
+            automation: BoxAutomationMetadata(
+              candidates: [LabelCandidate(labelId: 1, score: 0.95)],
+              pipelineVersion: 'test-v1',
+              policyVersion: 'test-policy-v1',
+              detectorSha256: 'detector-hash',
+            ),
           ),
         ],
       ),
