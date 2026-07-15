@@ -644,6 +644,187 @@ void main() {
     );
 
     test(
+      'create survives a post-commit backup existence probe failure',
+      () async {
+        await library.createProject('Seed');
+        var failProbe = true;
+        final probeLibrary = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          indexBackupExists: (backup) async {
+            if (failProbe) {
+              failProbe = false;
+              throw FileSystemException('injected backup probe failure');
+            }
+            return backup.exists();
+          },
+        );
+
+        final created = await probeLibrary.createProject('Committed Create');
+        final createdId = p.basename(p.dirname(created.projectFilePath!));
+        expect(createdId, 'fixed-project-2');
+        expect(
+          (await probeLibrary.openProject(createdId)).name,
+          'Committed Create',
+        );
+        expect(await _indexProjectIds(probeLibrary), {
+          'fixed-project',
+          'fixed-project-2',
+        });
+        expect(await _projectDirectoryNames(probeLibrary), {
+          'fixed-project',
+          'fixed-project-2',
+        });
+
+        await probeLibrary.renameProject(createdId, 'Queued Rename');
+        expect(
+          (await probeLibrary.openProject(createdId)).name,
+          'Queued Rename',
+        );
+      },
+    );
+
+    test('import survives a post-commit backup-root probe failure', () async {
+      await library.createProject('Seed');
+      var rootProbeCalls = 0;
+      final probeLibrary = ProjectLibrary(
+        rootPath: tempDir.path,
+        clock: () => now,
+        idGenerator: (name, timestamp) => 'fixed-project',
+        indexBackupRootExists: (root) async {
+          rootProbeCalls += 1;
+          if (rootProbeCalls == 2) {
+            throw FileSystemException('injected root probe failure');
+          }
+          return root.exists();
+        },
+      );
+
+      final imported = await probeLibrary.importProject(
+        _externalProject(tempDir.path),
+      );
+      final importedId = p.basename(p.dirname(imported.projectFilePath!));
+      expect(importedId, 'fixed-project-2');
+      expect((await probeLibrary.openProject(importedId)).images, hasLength(1));
+      expect(await _indexProjectIds(probeLibrary), {
+        'fixed-project',
+        'fixed-project-2',
+      });
+      expect(await _projectDirectoryNames(probeLibrary), {
+        'fixed-project',
+        'fixed-project-2',
+      });
+
+      await probeLibrary.renameProject(importedId, 'Queued Rename');
+      expect(
+        (await probeLibrary.openProject(importedId)).name,
+        'Queued Rename',
+      );
+    });
+
+    test(
+      'rename survives post-commit stale-backup enumeration failure',
+      () async {
+        await library.createProject('Original');
+        var listCalls = 0;
+        final probeLibrary = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          indexBackupRootList: (root) {
+            listCalls += 1;
+            if (listCalls == 2) {
+              throw FileSystemException('injected backup listing failure');
+            }
+            return root.list(followLinks: false);
+          },
+        );
+
+        final renamed = await probeLibrary.renameProject(
+          'fixed-project',
+          'Committed Rename',
+        );
+        expect(renamed.name, 'Committed Rename');
+        expect(
+          (await probeLibrary.listProjects()).single.name,
+          'Committed Rename',
+        );
+        expect(
+          (await probeLibrary.openProject('fixed-project')).name,
+          'Committed Rename',
+        );
+        expect(await _projectDirectoryNames(probeLibrary), {'fixed-project'});
+
+        await probeLibrary.renameProject('fixed-project', 'Queued Rename');
+        expect(
+          (await probeLibrary.openProject('fixed-project')).name,
+          'Queued Rename',
+        );
+      },
+    );
+
+    test('delete survives a post-commit backup-root probe failure', () async {
+      final created = await library.createProject('Delete Me');
+      final deletedDirectory = Directory(p.dirname(created.projectFilePath!));
+      var rootProbeCalls = 0;
+      final probeLibrary = ProjectLibrary(
+        rootPath: tempDir.path,
+        clock: () => now,
+        idGenerator: (name, timestamp) => 'fixed-project',
+        indexBackupRootExists: (root) async {
+          rootProbeCalls += 1;
+          if (rootProbeCalls == 2) {
+            throw FileSystemException('injected root probe failure');
+          }
+          return root.exists();
+        },
+      );
+
+      await probeLibrary.deleteProject('fixed-project');
+      expect(await deletedDirectory.exists(), isFalse);
+      expect(await probeLibrary.listProjects(), isEmpty);
+      expect(await _indexProjectIds(probeLibrary), isEmpty);
+      expect(await _projectDirectoryNames(probeLibrary), isEmpty);
+
+      final queued = await probeLibrary.createProject('Queued Create');
+      expect(p.basename(p.dirname(queued.projectFilePath!)), 'fixed-project');
+      expect(
+        (await probeLibrary.openProject('fixed-project')).name,
+        'Queued Create',
+      );
+    });
+
+    test(
+      'delete survives a post-commit tombstone existence probe failure',
+      () async {
+        final created = await library.createProject('Delete Me');
+        final deletedDirectory = Directory(p.dirname(created.projectFilePath!));
+        final probeLibrary = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          tombstoneExists: (tombstone) async {
+            throw FileSystemException('injected tombstone probe failure');
+          },
+        );
+
+        await probeLibrary.deleteProject('fixed-project');
+        expect(await deletedDirectory.exists(), isFalse);
+        expect(await _tombstoneNames(probeLibrary), hasLength(1));
+        expect(await probeLibrary.rebuildIndex(), isEmpty);
+        expect(await probeLibrary.listProjects(), isEmpty);
+
+        final queued = await probeLibrary.createProject('Queued Create');
+        expect(p.basename(p.dirname(queued.projectFilePath!)), 'fixed-project');
+        expect(
+          (await probeLibrary.openProject('fixed-project')).name,
+          'Queued Create',
+        );
+      },
+    );
+
+    test(
       'failed tombstone cleanup never resurrects a committed delete',
       () async {
         final created = await library.createProject('Delete Me');

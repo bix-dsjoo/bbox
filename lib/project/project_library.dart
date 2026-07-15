@@ -13,6 +13,11 @@ typedef ProjectLibraryOperationHook = Future<void> Function(String operation);
 typedef ProjectIndexWriteHook = Future<void> Function();
 typedef ProjectIndexBackupDelete = Future<void> Function(File backup);
 typedef ProjectTombstoneDelete = Future<void> Function(Directory tombstone);
+typedef ProjectFileExistsProbe = Future<bool> Function(File file);
+typedef ProjectDirectoryExistsProbe =
+    Future<bool> Function(Directory directory);
+typedef ProjectDirectoryListProbe =
+    Stream<FileSystemEntity> Function(Directory directory);
 
 abstract final class ProjectLibraryOperation {
   static const create = 'create';
@@ -89,10 +94,18 @@ class ProjectLibrary {
     this.beforeIndexWrite,
     ProjectIndexBackupDelete? deleteIndexBackup,
     ProjectTombstoneDelete? deleteTombstone,
+    ProjectFileExistsProbe? indexBackupExists,
+    ProjectDirectoryExistsProbe? indexBackupRootExists,
+    ProjectDirectoryListProbe? indexBackupRootList,
+    ProjectDirectoryExistsProbe? tombstoneExists,
   }) : _clock = clock ?? DateTime.now,
        _idGenerator = idGenerator ?? _defaultProjectId,
        _deleteIndexBackup = deleteIndexBackup ?? _deleteFile,
-       _deleteTombstone = deleteTombstone ?? _deleteDirectory;
+       _deleteTombstone = deleteTombstone ?? _deleteDirectory,
+       _indexBackupExists = indexBackupExists ?? _fileExists,
+       _indexBackupRootExists = indexBackupRootExists ?? _directoryExists,
+       _indexBackupRootList = indexBackupRootList ?? _listDirectory,
+       _tombstoneExists = tombstoneExists ?? _directoryExists;
 
   factory ProjectLibrary.appData({Map<String, String>? environment}) {
     final appData = environment?['APPDATA'] ?? Platform.environment['APPDATA'];
@@ -111,6 +124,10 @@ class ProjectLibrary {
   final ProjectIndexWriteHook? beforeIndexWrite;
   final ProjectIndexBackupDelete _deleteIndexBackup;
   final ProjectTombstoneDelete _deleteTombstone;
+  final ProjectFileExistsProbe _indexBackupExists;
+  final ProjectDirectoryExistsProbe _indexBackupRootExists;
+  final ProjectDirectoryListProbe _indexBackupRootList;
+  final ProjectDirectoryExistsProbe _tombstoneExists;
   Future<void> _operationTail = Future<void>.value();
 
   String get projectsRootPath => p.join(rootPath, 'projects');
@@ -264,9 +281,7 @@ class ProjectLibrary {
       }
       rethrow;
     }
-    if (tombstone != null && await tombstone.exists()) {
-      await _deleteTombstoneBestEffort(tombstone);
-    }
+    if (tombstone != null) await _deleteTombstoneBestEffort(tombstone);
   }
 
   Future<void> refreshEntry(
@@ -498,7 +513,7 @@ class ProjectLibrary {
 
   Future<void> _deleteIndexBackupBestEffort(File backup) async {
     try {
-      if (await backup.exists()) await _deleteIndexBackup(backup);
+      if (await _indexBackupExists(backup)) await _deleteIndexBackup(backup);
     } catch (_) {
       // Stale backups are retried by later index writes.
     }
@@ -506,10 +521,10 @@ class ProjectLibrary {
 
   Future<void> _cleanupStaleIndexBackupsBestEffort() async {
     final root = Directory(projectsRootPath);
-    if (!await root.exists()) return;
-    final prefix = '${p.basename(indexFilePath)}.bak-';
     try {
-      await for (final entity in root.list(followLinks: false)) {
+      if (!await _indexBackupRootExists(root)) return;
+      final prefix = '${p.basename(indexFilePath)}.bak-';
+      await for (final entity in _indexBackupRootList(root)) {
         if (entity is File && p.basename(entity.path).startsWith(prefix)) {
           await _deleteIndexBackupBestEffort(entity);
         }
@@ -521,7 +536,9 @@ class ProjectLibrary {
 
   Future<void> _deleteTombstoneBestEffort(Directory tombstone) async {
     try {
-      if (await tombstone.exists()) await _deleteTombstone(tombstone);
+      if (await _tombstoneExists(tombstone)) {
+        await _deleteTombstone(tombstone);
+      }
     } catch (_) {
       // Tombstones are excluded from rebuilds and may be cleaned up later.
     }
@@ -531,6 +548,14 @@ class ProjectLibrary {
 
   static Future<void> _deleteDirectory(Directory directory) =>
       directory.delete(recursive: true);
+
+  static Future<bool> _fileExists(File file) => file.exists();
+
+  static Future<bool> _directoryExists(Directory directory) =>
+      directory.exists();
+
+  static Stream<FileSystemEntity> _listDirectory(Directory directory) =>
+      directory.list(followLinks: false);
 
   static List<ProjectLibraryEntry> _sorted(List<ProjectLibraryEntry> entries) {
     return [...entries]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
