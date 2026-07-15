@@ -58,3 +58,39 @@ The following six pre-existing dirty files were never staged or modified by thes
 
 - Project-library serialization is intentionally per `ProjectLibrary` instance. It does not attempt cross-process locking, which was outside the requested single-instance queue scope.
 - The repository-wide formatter remains non-zero solely because the protected unrelated installer test is not formatted. Targeted feature files and static analysis are clean.
+
+## Re-review Fixes
+
+### Implemented
+
+- Candidate ownership is now normalized across hash and legacy filename/dimension indexes. After provisional unique matches from every key type, normalized candidate paths are grouped by owner image; a path with multiple owners makes every owner ambiguous and removes every provisional match.
+- Preferred-path collisions are aggregated by bucket. Preferred owners and general owners for a key are processed once per collision bucket, avoiding repeated expansion of the same general-owner set for each preferred image.
+- Snapshot reading now performs one text read, validates the resulting in-memory JSON map, and decodes/migrates that same map through `ProjectStore.decodeJson`. Ordinary `ProjectStore.load` uses the same tolerant in-memory decode helper.
+- Create/import/rename/delete library composites now roll back on index-write failure. New project directories are removed, rename restores the exact original JSON bytes, and delete uses a checked internal tombstone rename with restoration before index commit failure. The serialized queue recovers after every injected failure.
+
+### RED evidence
+
+- A single candidate that was unique under one hash key and one legacy signature key was assigned to both images. The mixed regression observed two matches where both image IDs had to be ambiguous.
+- With 120 preferred and 120 general owners in one collision signature, instrumentation observed 14,520 ownership work units, exceeding the near-linear bound of 2,880.
+- The snapshot single-read test initially failed to compile because no injected reader/shared in-memory decoder existed. Its disk payload intentionally contains an unknown post-validation box enum while the one injected read returns valid JSON.
+- Four injected index-write rollback tests initially failed to compile because no index-write seam existed. They cover create, import, rename, and delete, including a successful next operation on the same queue after each failure.
+
+### GREEN evidence
+
+- Relink focused suite: 18 tests passed. The mixed hash/signature candidate now makes both owners ambiguous.
+- Preferred/general collision fixture stays within 2,880 instrumented ownership units for 240 images, with all owners conservatively ambiguous.
+- Snapshot/store/schema migration focused set: 39 tests passed; the injected reader is called exactly once and the valid in-memory labeled box is decoded despite the different disk payload.
+- Library focused suite: 16 tests passed, including exact JSON restoration, tombstone cleanup, index/directory state, and queue-tail recovery.
+- Combined affected snapshot/library/relink/controller/integration set: 136 tests passed.
+- Fresh full Flutter suite after re-review commits: 514 tests passed.
+- `flutter analyze`: no issues found.
+
+### Re-review commits
+
+- `e9027d0 fix: close portable relink ownership gaps`
+- `e0ce6a4 fix: roll back failed library mutations`
+
+### Re-review limitations
+
+- The existing per-instance queue and cross-process limitation remain unchanged.
+- Repository-wide formatting still differs only in the protected unrelated installer test; no protected file was staged or modified by the re-review fixes.
