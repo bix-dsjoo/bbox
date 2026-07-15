@@ -129,3 +129,34 @@ The following six pre-existing dirty files were never staged or modified by thes
 
 - Serialization remains intentionally per `ProjectLibrary` instance; cross-process locking remains outside scope.
 - Repository-wide formatting still differs only in the protected unrelated installer test. All closure files are formatted, and none of the six protected dirty files was staged or modified.
+
+## Post-commit Probe Fix
+
+### Implemented
+
+- Direct backup existence checks, backup-root existence checks, stale-backup directory stream creation/enumeration, and tombstone existence checks now execute entirely inside their best-effort cleanup boundaries.
+- Delete no longer performs a tombstone `exists` probe outside cleanup. Once the index commit succeeds, it unconditionally hands the tombstone to the guarded helper, so probe or deletion failures cannot reverse logical success.
+- Injectable file-exists, directory-exists, and directory-list seams cover each post-commit probe without changing the pre-commit rollback boundary.
+
+### RED evidence
+
+- Five new regressions initially failed to compile because the backup existence, backup-root existence/listing, and tombstone existence seams did not exist.
+- Create injects a direct backup existence failure; import and delete inject the second backup-root existence call after promotion; rename injects the second stale-backup enumeration after promotion; tombstone delete injects an existence-probe failure after the delete index commit.
+- Every case requires a successful operation result, matching JSON/index/directory state, and a successful next operation on the same serialized queue. The tombstone case also requires rebuild/list to keep the failed-cleanup directory excluded.
+
+### GREEN evidence
+
+- Project-library focused suite: 27 tests passed, including all existing pre-commit create/import/rename/delete rollback cases.
+- Affected project/controller/home/transfer/integration set: 158 tests passed.
+- Fresh full Flutter suite: 526 tests passed.
+- `flutter analyze`: no issues found.
+- Targeted Dart format check: 2 files, 0 changes.
+- `git diff --check`: clean.
+
+### Post-commit probe commit
+
+- `b0d6d39 fix: contain post-commit probe failures`
+
+### Result
+
+DONE. No post-commit backup or tombstone existence/enumeration probe can propagate through the guarded cleanup paths. The six protected pre-existing dirty files remain unstaged and unmodified by this fix.
