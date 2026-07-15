@@ -41,10 +41,18 @@ class ProjectStore {
     final file = File(projectFilePath);
     final raw = await file.readAsString(encoding: utf8);
     final json = jsonDecode(raw) as Map<String, Object?>;
+    return decodeJson(json, projectFilePath: projectFilePath);
+  }
+
+  static AnnotationProject decodeJson(
+    Map<String, Object?> json, {
+    String? projectFilePath,
+  }) {
     final migrated = _migrateToCurrent(json);
-    return AnnotationProject.fromJson(
-      migrated,
-    ).copyWith(projectFilePath: projectFilePath);
+    final decoded = AnnotationProject.fromJson(migrated);
+    return projectFilePath == null
+        ? decoded
+        : decoded.copyWith(projectFilePath: projectFilePath);
   }
 
   static Map<String, Object?> _migrateToCurrent(Map<String, Object?> json) {

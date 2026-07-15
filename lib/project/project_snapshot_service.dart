@@ -5,6 +5,7 @@ import '../annotation/models.dart';
 import 'project_store.dart';
 
 typedef SnapshotClock = DateTime Function();
+typedef SnapshotTextReader = Future<String> Function(String path);
 
 class InvalidProjectSnapshotException implements Exception {
   const InvalidProjectSnapshotException(this.message);
@@ -17,18 +18,27 @@ class InvalidProjectSnapshotException implements Exception {
 
 class ProjectSnapshotService {
   ProjectSnapshotService({SnapshotClock? clock})
-    : this._(clock, _defaultRenameFile);
+    : this._(clock, _defaultRenameFile, _defaultReadText);
 
   ProjectSnapshotService.withFileRenamerForTesting({
     SnapshotClock? clock,
     required Future<File> Function(File source, String newPath) renameFile,
-  }) : this._(clock, renameFile);
+  }) : this._(clock, renameFile, _defaultReadText);
 
-  ProjectSnapshotService._(SnapshotClock? clock, this._renameFile)
-    : _clock = clock ?? DateTime.now;
+  ProjectSnapshotService.withTextReaderForTesting({
+    SnapshotClock? clock,
+    required SnapshotTextReader readText,
+  }) : this._(clock, _defaultRenameFile, readText);
+
+  ProjectSnapshotService._(
+    SnapshotClock? clock,
+    this._renameFile,
+    this._readText,
+  ) : _clock = clock ?? DateTime.now;
 
   final SnapshotClock _clock;
   final Future<File> Function(File source, String newPath) _renameFile;
+  final SnapshotTextReader _readText;
 
   Future<void> writeSnapshot(
     AnnotationProject project,
@@ -84,9 +94,13 @@ class ProjectSnapshotService {
     return source.rename(newPath);
   }
 
+  static Future<String> _defaultReadText(String path) {
+    return File(path).readAsString(encoding: utf8);
+  }
+
   Future<AnnotationProject> readSnapshot(String path) async {
     try {
-      final rawText = await File(path).readAsString(encoding: utf8);
+      final rawText = await _readText(path);
       final decoded = jsonDecode(rawText);
       if (decoded is! Map<String, Object?>) {
         throw const InvalidProjectSnapshotException(
@@ -94,7 +108,7 @@ class ProjectSnapshotService {
         );
       }
       _validateRawSnapshot(decoded);
-      final loaded = await ProjectStore.load(path);
+      final loaded = ProjectStore.decodeJson(decoded);
       final snapshot = loaded.copyWith(
         projectFilePath: null,
         status: ProjectStatus.ready,

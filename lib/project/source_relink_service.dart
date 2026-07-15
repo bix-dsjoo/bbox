@@ -29,6 +29,7 @@ typedef SourceCandidateMetadataLoader =
     });
 typedef SourcePathKey = String Function(String path);
 typedef SourceCandidateLookupObserver = void Function();
+typedef SourceOwnershipWorkObserver = void Function(int workUnits);
 
 class SourceRelinkResult {
   const SourceRelinkResult({
@@ -54,12 +55,14 @@ class SourceRelinkService {
     this.metadataLoader,
     this.pathKey = _defaultSourcePathKey,
     this.onCandidateLookup,
+    this.onOwnershipWork,
   });
 
   final int maxConcurrentCandidateLoads;
   final SourceCandidateMetadataLoader? metadataLoader;
   final SourcePathKey pathKey;
   final SourceCandidateLookupObserver? onCandidateLookup;
+  final SourceOwnershipWorkObserver? onOwnershipWork;
 
   Future<Map<int, SourceAvailability>> inspectSources(
     Iterable<AnnotatedImage> images,
@@ -185,36 +188,59 @@ class SourceRelinkService {
 
     final ambiguous = <int>{};
     final single = <int, _CandidateMetadata>{};
+    void markAmbiguous(Iterable<int> imageIds) {
+      final ids = imageIds is List<int>
+          ? imageIds
+          : imageIds.toList(growable: false);
+      onOwnershipWork?.call(ids.length);
+      ambiguous.addAll(ids);
+    }
+
     for (final entry in generalOwners.entries) {
       final bucket = buckets[entry.key] ?? const <_CandidateMetadata>[];
       if (bucket.isEmpty) {
         continue;
       }
       if (bucket.length != 1 || entry.value.length != 1) {
-        ambiguous.addAll(entry.value);
+        markAmbiguous(entry.value);
       } else {
         single[entry.value.single] = bucket.single;
       }
     }
 
     final preferredOwnersByPath = <String, List<int>>{};
+    final preferredOwnersByBucket = <_CandidateBucketKey, List<int>>{};
     for (final entry in preferredByImage.entries) {
       preferredOwnersByPath
           .putIfAbsent(pathKey(entry.value.path), () => <int>[])
           .add(entry.key);
+      for (final bucketKey in entry.value.bucketKeys) {
+        preferredOwnersByBucket
+            .putIfAbsent(bucketKey, () => <int>[])
+            .add(entry.key);
+      }
     }
     for (final entry in preferredOwnersByPath.entries) {
-      if (entry.value.length > 1) ambiguous.addAll(entry.value);
+      if (entry.value.length > 1) markAmbiguous(entry.value);
+    }
+    for (final entry in preferredOwnersByBucket.entries) {
+      final general = generalOwners[entry.key];
+      if (general == null || general.isEmpty) continue;
+      markAmbiguous(entry.value);
+      markAmbiguous(general);
     }
     for (final entry in preferredByImage.entries) {
-      final candidate = entry.value;
-      for (final bucketKey in candidate.bucketKeys) {
-        final owners = generalOwners[bucketKey];
-        if (owners == null || owners.isEmpty) continue;
-        ambiguous.add(entry.key);
-        ambiguous.addAll(owners);
-      }
-      if (!ambiguous.contains(entry.key)) single[entry.key] = candidate;
+      if (!ambiguous.contains(entry.key)) single[entry.key] = entry.value;
+    }
+
+    final provisionalOwnersByPath = <String, List<int>>{};
+    for (final entry in single.entries) {
+      provisionalOwnersByPath
+          .putIfAbsent(pathKey(entry.value.path), () => <int>[])
+          .add(entry.key);
+    }
+    for (final owners in provisionalOwnersByPath.values) {
+      if (owners.length > 1) markAmbiguous(owners);
     }
     single.removeWhere((imageId, _) => ambiguous.contains(imageId));
 

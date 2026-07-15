@@ -59,6 +59,28 @@ void main() {
       },
     );
 
+    test('validates and decodes the same single snapshot read', () async {
+      final transferPath = p.join(tempDir.path, 'single-read.bbox.json');
+      final validRaw = _project(projectFilePath: null).toJson();
+      final swappedRaw =
+          jsonDecode(jsonEncode(validRaw)) as Map<String, Object?>;
+      _rawBox(swappedRaw)['status'] = 'unknown-after-validation';
+      await File(transferPath).writeAsString(jsonEncode(swappedRaw));
+      var reads = 0;
+      final singleReadService = ProjectSnapshotService.withTextReaderForTesting(
+        readText: (path) async {
+          reads += 1;
+          return jsonEncode(validRaw);
+        },
+      );
+
+      final restored = await singleReadService.readSnapshot(transferPath);
+
+      expect(reads, 1);
+      expect(restored.images.single.boxes.single.status, BoxStatus.labeled);
+      expect(restored.images.single.boxes.single.labelId, 1);
+    });
+
     test(
       'atomically replaces an existing snapshot and removes artifacts',
       () async {

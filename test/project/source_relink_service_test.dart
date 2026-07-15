@@ -165,6 +165,42 @@ void main() {
   });
 
   test(
+    'one candidate shared by hash and legacy signature is ambiguous for both',
+    () async {
+      final candidatePath = p.join(tempDir.path, 'candidate', 'bread.png');
+      final seamService = SourceRelinkService(
+        metadataLoader: (path, {required includeHash}) async {
+          expect(includeHash, isTrue);
+          return const SourceCandidateMetadata(
+            width: 32,
+            height: 24,
+            sha256: 'shared-hash',
+          );
+        },
+      );
+
+      final result = await seamService.relinkFiles(
+        missingImages: [
+          _image(
+            id: 1,
+            sourcePath: p.join(tempDir.path, 'old-hash', 'bread.png'),
+            contentSha256: 'shared-hash',
+          ),
+          _image(
+            id: 2,
+            sourcePath: p.join(tempDir.path, 'old-legacy', 'bread.png'),
+          ),
+        ],
+        candidatePaths: [candidatePath],
+      );
+
+      expect(result.matchedPaths, isEmpty);
+      expect(result.unresolvedImageIds, isEmpty);
+      expect(result.ambiguousImageIds, {1, 2});
+    },
+  );
+
+  test(
     'explicit single-file relink resolves only the selected image',
     () async {
       final selectedCandidate = await _writePng(
@@ -442,6 +478,56 @@ void main() {
       expect(lookups, count);
       expect(result.matchedPaths, isEmpty);
       expect(result.ambiguousImageIds, hasLength(count));
+    },
+  );
+
+  test(
+    'preferred and general collision ownership work stays near linear',
+    () async {
+      const preferredCount = 120;
+      const generalCount = 120;
+      final replacementRoot = await Directory(
+        p.join(tempDir.path, 'replacement-heavy'),
+      ).create();
+      final originalRoot = p.join(tempDir.path, 'original-heavy');
+      for (var index = 0; index < preferredCount; index++) {
+        final file = File(
+          p.join(replacementRoot.path, 'batch-$index', 'bread.png'),
+        );
+        await file.parent.create(recursive: true);
+        await file.writeAsBytes(const [0]);
+      }
+      var ownershipWork = 0;
+      final seamService = SourceRelinkService(
+        onOwnershipWork: (units) => ownershipWork += units,
+        metadataLoader: (path, {required includeHash}) async =>
+            const SourceCandidateMetadata(width: 32, height: 24),
+      );
+      final images = [
+        for (var index = 0; index < preferredCount; index++)
+          _image(
+            id: index + 1,
+            sourcePath: p.join(originalRoot, 'batch-$index', 'bread.png'),
+            importedFrom: originalRoot,
+          ),
+        for (var index = 0; index < generalCount; index++)
+          _image(
+            id: preferredCount + index + 1,
+            sourcePath: p.join(tempDir.path, 'legacy-$index', 'bread.png'),
+          ),
+      ];
+
+      final result = await seamService.relinkFolder(
+        missingImages: images,
+        folderPath: replacementRoot.path,
+      );
+
+      expect(result.matchedPaths, isEmpty);
+      expect(result.ambiguousImageIds, hasLength(images.length));
+      expect(
+        ownershipWork,
+        lessThanOrEqualTo((preferredCount + generalCount) * 12),
+      );
     },
   );
 }
