@@ -508,11 +508,69 @@ void main() {
         );
         final decoration = box.decoration! as BoxDecoration;
         expect(decoration.border!.top.color, Colors.white);
+        expect(decoration.border!.top.width, 2);
+        expect(decoration.color, Colors.transparent);
+        expect(decoration.boxShadow, isNull);
         final badge = tester.widget<CustomPaint>(
           find.byKey(const ValueKey('overlay-label-box-1')),
         );
         final dynamic painter = badge.painter;
         expect(painter.backgroundColor, const Color(0xffe64a19));
+      },
+    );
+
+    testWidgets(
+      'selected labeled box keeps clear interior and eight resize handles',
+      (tester) async {
+        final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+          ..loadProject(
+            project().copyWith(
+              images: [
+                project().images.first.copyWith(
+                  boxes: const [
+                    BoundingBox(
+                      id: 'box-1',
+                      x: 10,
+                      y: 10,
+                      width: 20,
+                      height: 20,
+                      status: BoxStatus.labeled,
+                      labelId: 1,
+                    ),
+                  ],
+                ),
+                project().images.last,
+              ],
+            ),
+          );
+        controller.selectBox('box-1');
+
+        await tester.pumpWidget(app(controller));
+
+        final box = tester.widget<Container>(
+          find.byKey(const ValueKey('selected-box-box-1')),
+        );
+        final decoration = box.decoration! as BoxDecoration;
+        expect(decoration.border!.top.color, Colors.white);
+        expect(decoration.border!.top.width, 3);
+        expect(decoration.color, Colors.transparent);
+        expect(decoration.boxShadow, isNull);
+
+        for (final handle in [
+          'topLeft',
+          'top',
+          'topRight',
+          'left',
+          'right',
+          'bottomLeft',
+          'bottom',
+          'bottomRight',
+        ]) {
+          expect(
+            find.byKey(ValueKey('resize-handle-box-1-$handle')),
+            findsOneWidget,
+          );
+        }
       },
     );
 

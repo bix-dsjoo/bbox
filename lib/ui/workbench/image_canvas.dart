@@ -635,9 +635,10 @@ class _BoxOverlay extends StatelessWidget {
       label: semanticDisplayLabel,
       selected: selected,
     );
+    final isLabeled = box.status == BoxStatus.labeled && box.labelId != null;
     final color = box.requiresLabelReview
         ? WorkbenchPalette.danger
-        : box.status == BoxStatus.labeled && box.labelId != null
+        : isLabeled
         ? Colors.white
         : _automaticBoxColor;
     final labelColor = label == null ? null : Color(label.color);
@@ -652,6 +653,9 @@ class _BoxOverlay extends StatelessWidget {
         : box.status == BoxStatus.proposal
         ? (selected ? _automaticBoxSelectedFillAlpha : _automaticBoxFillAlpha)
         : (selected ? 28 : 14);
+    final fillColor = isLabeled
+        ? Colors.transparent
+        : color.withAlpha(fillAlpha);
     final handleHitSize = _resizeHandleHitSize;
     final overlayMargin = selected ? handleHitSize / 2 : 0.0;
 
@@ -685,18 +689,8 @@ class _BoxOverlay extends StatelessWidget {
                   ),
                   decoration: BoxDecoration(
                     border: Border.all(color: color, width: selected ? 3 : 2),
-                    color: color.withAlpha(fillAlpha),
+                    color: fillColor,
                     borderRadius: BorderRadius.circular(4),
-                    boxShadow:
-                        box.status == BoxStatus.labeled && box.labelId != null
-                        ? const [
-                            BoxShadow(
-                              color: Color(0xcc000000),
-                              blurRadius: 0,
-                              spreadRadius: 1,
-                            ),
-                          ]
-                        : null,
                   ),
                 ),
               ),
