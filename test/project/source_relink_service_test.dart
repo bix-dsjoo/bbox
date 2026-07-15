@@ -445,6 +445,41 @@ void main() {
   );
 
   test(
+    'default metadata uses the decoded bytes for the content hash',
+    () async {
+      final bytes = img.encodePng(img.Image(width: 17, height: 13));
+      var reads = 0;
+      final candidatePath = p.join(tempDir.path, 'never-read-from-disk.png');
+      final seamService = SourceRelinkService(
+        candidateBytesLoader: (path) async {
+          reads += 1;
+          expect(path, p.normalize(p.absolute(candidatePath)));
+          return bytes;
+        },
+      );
+      final missing = _image(
+        sourcePath: p.join(tempDir.path, 'old', 'never-read-from-disk.png'),
+        width: 17,
+        height: 13,
+        contentSha256: sha256.convert(bytes).toString(),
+      );
+
+      final result = await seamService.relinkFiles(
+        missingImages: [missing],
+        candidatePaths: [candidatePath],
+      );
+
+      expect(reads, 1);
+      expect(
+        result.matchedPaths[missing.id],
+        p.normalize(p.absolute(candidatePath)),
+      );
+      expect(result.unresolvedImageIds, isEmpty);
+      expect(result.ambiguousImageIds, isEmpty);
+    },
+  );
+
+  test(
     'collision-heavy matching performs one indexed lookup per image',
     () async {
       const count = 600;

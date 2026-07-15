@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:image/image.dart' as img;
@@ -27,6 +28,7 @@ typedef SourceCandidateMetadataLoader =
       String path, {
       required bool includeHash,
     });
+typedef SourceCandidateBytesLoader = Future<Uint8List> Function(String path);
 typedef SourcePathKey = String Function(String path);
 typedef SourceCandidateLookupObserver = void Function();
 typedef SourceOwnershipWorkObserver = void Function(int workUnits);
@@ -53,6 +55,7 @@ class SourceRelinkService {
   const SourceRelinkService({
     this.maxConcurrentCandidateLoads = 4,
     this.metadataLoader,
+    this.candidateBytesLoader,
     this.pathKey = _defaultSourcePathKey,
     this.onCandidateLookup,
     this.onOwnershipWork,
@@ -60,6 +63,7 @@ class SourceRelinkService {
 
   final int maxConcurrentCandidateLoads;
   final SourceCandidateMetadataLoader? metadataLoader;
+  final SourceCandidateBytesLoader? candidateBytesLoader;
   final SourcePathKey pathKey;
   final SourceCandidateLookupObserver? onCandidateLookup;
   final SourceOwnershipWorkObserver? onOwnershipWork;
@@ -274,10 +278,14 @@ class SourceRelinkService {
     bool includeHash,
   ) async {
     try {
-      final loaded = await (metadataLoader ?? _loadCandidateMetadata)(
-        path,
-        includeHash: includeHash,
-      );
+      final customMetadataLoader = metadataLoader;
+      final loaded = customMetadataLoader != null
+          ? await customMetadataLoader(path, includeHash: includeHash)
+          : await _loadCandidateMetadata(
+              path,
+              includeHash: includeHash,
+              bytesLoader: candidateBytesLoader ?? _readCandidateBytes,
+            );
       if (loaded == null) return _CandidateInspection.unreadable(path);
       return _CandidateInspection.readable(
         _CandidateMetadata(
@@ -307,22 +315,24 @@ class SourceRelinkService {
 Future<SourceCandidateMetadata?> _loadCandidateMetadata(
   String path, {
   required bool includeHash,
+  required SourceCandidateBytesLoader bytesLoader,
 }) async {
-  final file = File(path);
-  final bytes = await file.readAsBytes();
+  final bytes = await bytesLoader(path);
   final dimensions = await Isolate.run<({int width, int height})?>(() {
     final decoded = img.decodeImage(bytes);
     if (decoded == null) return null;
     return (width: decoded.width, height: decoded.height);
   });
   if (dimensions == null) return null;
-  final digest = includeHash ? await sha256.bind(file.openRead()).first : null;
+  final digest = includeHash ? sha256.convert(bytes) : null;
   return SourceCandidateMetadata(
     width: dimensions.width,
     height: dimensions.height,
     sha256: digest?.toString(),
   );
 }
+
+Future<Uint8List> _readCandidateBytes(String path) => File(path).readAsBytes();
 
 String sourcePathKey(String path, {required bool isWindows}) {
   final normalized = p.normalize(p.absolute(path));

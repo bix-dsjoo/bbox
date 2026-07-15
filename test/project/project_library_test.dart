@@ -495,6 +495,230 @@ void main() {
       expect(await rollbackLibrary.listProjects(), isEmpty);
       expect(await _tombstoneNames(rollbackLibrary), isEmpty);
     });
+
+    test(
+      'create stays committed when promoted index backup cleanup fails',
+      () async {
+        await library.createProject('Seed');
+        var blockCleanup = true;
+        final cleanupLibrary = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          deleteIndexBackup: (backup) async {
+            if (blockCleanup) {
+              throw FileSystemException('injected backup cleanup failure');
+            }
+            await backup.delete();
+          },
+        );
+
+        final created = await cleanupLibrary.createProject('Committed Create');
+        expect(
+          p.basename(p.dirname(created.projectFilePath!)),
+          'fixed-project-2',
+        );
+        expect(await _indexProjectIds(cleanupLibrary), {
+          'fixed-project',
+          'fixed-project-2',
+        });
+        expect(await _indexBackupNames(cleanupLibrary), hasLength(1));
+
+        blockCleanup = false;
+        await cleanupLibrary.createProject('Queued Create');
+        expect(await _indexProjectIds(cleanupLibrary), {
+          'fixed-project',
+          'fixed-project-2',
+          'fixed-project-3',
+        });
+        expect(await _indexBackupNames(cleanupLibrary), isEmpty);
+      },
+    );
+
+    test(
+      'import stays committed when promoted index backup cleanup fails',
+      () async {
+        await library.createProject('Seed');
+        var blockCleanup = true;
+        final cleanupLibrary = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          deleteIndexBackup: (backup) async {
+            if (blockCleanup) {
+              throw FileSystemException('injected backup cleanup failure');
+            }
+            await backup.delete();
+          },
+        );
+
+        final imported = await cleanupLibrary.importProject(
+          _externalProject(tempDir.path),
+        );
+        expect(
+          p.basename(p.dirname(imported.projectFilePath!)),
+          'fixed-project-2',
+        );
+        expect(await _indexProjectIds(cleanupLibrary), {
+          'fixed-project',
+          'fixed-project-2',
+        });
+        expect(await _indexBackupNames(cleanupLibrary), hasLength(1));
+
+        blockCleanup = false;
+        await cleanupLibrary.renameProject('fixed-project-2', 'Queued Rename');
+        expect(
+          (await cleanupLibrary.openProject('fixed-project-2')).name,
+          'Queued Rename',
+        );
+        expect(await _indexBackupNames(cleanupLibrary), isEmpty);
+      },
+    );
+
+    test(
+      'rename stays committed when promoted index backup cleanup fails',
+      () async {
+        await library.createProject('Original');
+        var blockCleanup = true;
+        final cleanupLibrary = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          deleteIndexBackup: (backup) async {
+            if (blockCleanup) {
+              throw FileSystemException('injected backup cleanup failure');
+            }
+            await backup.delete();
+          },
+        );
+
+        final renamed = await cleanupLibrary.renameProject(
+          'fixed-project',
+          'Committed Rename',
+        );
+        expect(renamed.name, 'Committed Rename');
+        expect(
+          (await cleanupLibrary.listProjects()).single.name,
+          'Committed Rename',
+        );
+        expect(await _indexBackupNames(cleanupLibrary), hasLength(1));
+
+        blockCleanup = false;
+        await cleanupLibrary.renameProject('fixed-project', 'Queued Rename');
+        expect(
+          (await cleanupLibrary.openProject('fixed-project')).name,
+          'Queued Rename',
+        );
+        expect(await _indexBackupNames(cleanupLibrary), isEmpty);
+      },
+    );
+
+    test(
+      'delete stays committed when promoted index backup cleanup fails',
+      () async {
+        final created = await library.createProject('Delete Me');
+        final directory = Directory(p.dirname(created.projectFilePath!));
+        var blockCleanup = true;
+        final cleanupLibrary = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          deleteIndexBackup: (backup) async {
+            if (blockCleanup) {
+              throw FileSystemException('injected backup cleanup failure');
+            }
+            await backup.delete();
+          },
+        );
+
+        await cleanupLibrary.deleteProject('fixed-project');
+        expect(await directory.exists(), isFalse);
+        expect(await cleanupLibrary.listProjects(), isEmpty);
+        expect(await _indexBackupNames(cleanupLibrary), hasLength(1));
+
+        blockCleanup = false;
+        await cleanupLibrary.createProject('Queued Create');
+        expect(await _indexProjectIds(cleanupLibrary), {'fixed-project'});
+        expect(await _indexBackupNames(cleanupLibrary), isEmpty);
+      },
+    );
+
+    test(
+      'failed tombstone cleanup never resurrects a committed delete',
+      () async {
+        final created = await library.createProject('Delete Me');
+        final directory = Directory(p.dirname(created.projectFilePath!));
+        final cleanupLibrary = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'fixed-project',
+          deleteTombstone: (tombstone) async {
+            throw FileSystemException('injected tombstone cleanup failure');
+          },
+        );
+
+        await cleanupLibrary.deleteProject('fixed-project');
+        expect(await directory.exists(), isFalse);
+        expect(await _tombstoneNames(cleanupLibrary), hasLength(1));
+        expect(await cleanupLibrary.rebuildIndex(), isEmpty);
+        expect(await cleanupLibrary.listProjects(), isEmpty);
+
+        final queued = await cleanupLibrary.createProject('Queued Create');
+        expect(p.basename(p.dirname(queued.projectFilePath!)), 'fixed-project');
+        expect(await _indexProjectIds(cleanupLibrary), {'fixed-project'});
+      },
+    );
+
+    test(
+      'rejects cross-id index paths before open rename refresh or delete',
+      () async {
+        var nextId = 0;
+        final ownershipLibrary = ProjectLibrary(
+          rootPath: tempDir.path,
+          clock: () => now,
+          idGenerator: (name, timestamp) => 'project-${++nextId}',
+        );
+        final projectA = await ownershipLibrary.createProject('Project A');
+        final projectB = await ownershipLibrary.createProject('Project B');
+        final fileA = File(projectA.projectFilePath!);
+        final fileB = File(projectB.projectFilePath!);
+        final bytesA = await fileA.readAsBytes();
+        final bytesB = await fileB.readAsBytes();
+        final indexFile = File(ownershipLibrary.indexFilePath);
+        final index =
+            jsonDecode(await indexFile.readAsString()) as Map<String, Object?>;
+        final projects = index['projects']! as List<Object?>;
+        final entryA = projects.cast<Map<String, Object?>>().singleWhere(
+          (entry) => entry['id'] == 'project-1',
+        );
+        entryA['projectFilePath'] = projectB.projectFilePath;
+        await indexFile.writeAsString(jsonEncode(index), flush: true);
+        final corruptIndexBytes = await indexFile.readAsBytes();
+
+        await expectLater(
+          ownershipLibrary.openProject('project-1'),
+          throwsA(isA<StateError>()),
+        );
+        await expectLater(
+          ownershipLibrary.renameProject('project-1', 'Do Not Rename'),
+          throwsA(isA<StateError>()),
+        );
+        await expectLater(
+          ownershipLibrary.refreshEntry(projectB),
+          throwsA(isA<StateError>()),
+        );
+        await expectLater(
+          ownershipLibrary.deleteProject('project-1'),
+          throwsA(isA<StateError>()),
+        );
+
+        expect(await fileA.readAsBytes(), bytesA);
+        expect(await fileB.readAsBytes(), bytesB);
+        expect(await indexFile.readAsBytes(), corruptIndexBytes);
+        expect(await Directory(p.dirname(fileA.path)).exists(), isTrue);
+        expect(await Directory(p.dirname(fileB.path)).exists(), isTrue);
+      },
+    );
   });
 }
 
@@ -523,6 +747,16 @@ Future<Set<String>> _tombstoneNames(ProjectLibrary library) async {
     await for (final entity in root.list(followLinks: false))
       if (p.basename(entity.path).contains('.deleting-'))
         p.basename(entity.path),
+  };
+}
+
+Future<Set<String>> _indexBackupNames(ProjectLibrary library) async {
+  final root = Directory(library.projectsRootPath);
+  if (!await root.exists()) return const {};
+  final prefix = '${p.basename(library.indexFilePath)}.bak-';
+  return {
+    await for (final entity in root.list(followLinks: false))
+      if (p.basename(entity.path).startsWith(prefix)) p.basename(entity.path),
   };
 }
 

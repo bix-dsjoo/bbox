@@ -11,6 +11,8 @@ typedef Clock = DateTime Function();
 typedef ProjectIdGenerator = String Function(String name, DateTime timestamp);
 typedef ProjectLibraryOperationHook = Future<void> Function(String operation);
 typedef ProjectIndexWriteHook = Future<void> Function();
+typedef ProjectIndexBackupDelete = Future<void> Function(File backup);
+typedef ProjectTombstoneDelete = Future<void> Function(Directory tombstone);
 
 abstract final class ProjectLibraryOperation {
   static const create = 'create';
@@ -85,8 +87,12 @@ class ProjectLibrary {
     ProjectIdGenerator? idGenerator,
     this.beforeOperation,
     this.beforeIndexWrite,
+    ProjectIndexBackupDelete? deleteIndexBackup,
+    ProjectTombstoneDelete? deleteTombstone,
   }) : _clock = clock ?? DateTime.now,
-       _idGenerator = idGenerator ?? _defaultProjectId;
+       _idGenerator = idGenerator ?? _defaultProjectId,
+       _deleteIndexBackup = deleteIndexBackup ?? _deleteFile,
+       _deleteTombstone = deleteTombstone ?? _deleteDirectory;
 
   factory ProjectLibrary.appData({Map<String, String>? environment}) {
     final appData = environment?['APPDATA'] ?? Platform.environment['APPDATA'];
@@ -103,6 +109,8 @@ class ProjectLibrary {
   final ProjectIdGenerator _idGenerator;
   final ProjectLibraryOperationHook? beforeOperation;
   final ProjectIndexWriteHook? beforeIndexWrite;
+  final ProjectIndexBackupDelete _deleteIndexBackup;
+  final ProjectTombstoneDelete _deleteTombstone;
   Future<void> _operationTail = Future<void>.value();
 
   String get projectsRootPath => p.join(rootPath, 'projects');
@@ -133,7 +141,7 @@ class ProjectLibrary {
     final timestamp = _clock().toUtc();
     final id = await _uniqueProjectId(name, timestamp);
     final projectFilePath = p.join(projectsRootPath, id, 'project.bbox.json');
-    final projectDirectory = _checkedProjectDirectory(projectFilePath);
+    final projectDirectory = _checkedProjectDirectory(id, projectFilePath);
     try {
       final project = AnnotationProject.empty(name: _normalizeName(name))
           .copyWith(
@@ -149,7 +157,7 @@ class ProjectLibrary {
       );
       return saved;
     } catch (_) {
-      await _deleteProjectDirectoryIfPresent(projectDirectory);
+      await _deleteProjectDirectoryIfPresent(id, projectDirectory);
       rethrow;
     }
   }
@@ -166,7 +174,7 @@ class ProjectLibrary {
     final timestamp = _clock().toUtc();
     final id = await _uniqueProjectId(source.name, timestamp);
     final targetPath = p.join(projectsRootPath, id, 'project.bbox.json');
-    final projectDirectory = _checkedProjectDirectory(targetPath);
+    final projectDirectory = _checkedProjectDirectory(id, targetPath);
     final imported = source.copyWith(
       projectFilePath: targetPath,
       status: ProjectStatus.ready,
@@ -180,7 +188,7 @@ class ProjectLibrary {
       );
       return saved;
     } catch (_) {
-      await _deleteProjectDirectoryIfPresent(projectDirectory);
+      await _deleteProjectDirectoryIfPresent(id, projectDirectory);
       rethrow;
     }
   }
@@ -194,7 +202,11 @@ class ProjectLibrary {
       (entry) => entry.id == id,
       orElse: () => throw StateError('Project not found: $id'),
     );
-    return ProjectStore.load(entry.projectFilePath);
+    final projectFilePath = _checkedProjectFilePath(
+      entry.id,
+      entry.projectFilePath,
+    );
+    return ProjectStore.load(projectFilePath);
   }
 
   Future<AnnotationProject> renameProject(String id, String name) => _serialize(
@@ -208,7 +220,7 @@ class ProjectLibrary {
   ) async {
     final project = await _openProjectUnlocked(id);
     final projectFilePath = project.projectFilePath!;
-    _checkedProjectDirectory(projectFilePath);
+    _checkedProjectDirectory(id, projectFilePath);
     final projectFile = File(projectFilePath);
     final originalBytes = await projectFile.readAsBytes();
     final renamed = project.copyWith(name: _normalizeName(name));
@@ -233,7 +245,10 @@ class ProjectLibrary {
       (entry) => entry.id == id,
       orElse: () => throw StateError('Project not found: $id'),
     );
-    final projectDir = _checkedProjectDirectory(entry.projectFilePath);
+    final projectDir = _checkedProjectDirectory(
+      entry.id,
+      entry.projectFilePath,
+    );
     Directory? tombstone;
     if (await projectDir.exists()) {
       tombstone = await _nextTombstone(projectDir);
@@ -250,7 +265,7 @@ class ProjectLibrary {
       rethrow;
     }
     if (tombstone != null && await tombstone.exists()) {
-      await tombstone.delete(recursive: true);
+      await _deleteTombstoneBestEffort(tombstone);
     }
   }
 
@@ -277,7 +292,11 @@ class ProjectLibrary {
       throw StateError('Project file path is required.');
     }
     final id = p.basename(p.dirname(projectFilePath));
+    _checkedProjectFilePath(id, projectFilePath);
     final entries = await _listProjectsUnlocked();
+    for (final entry in entries) {
+      _checkedProjectFilePath(entry.id, entry.projectFilePath);
+    }
     ProjectLibraryEntry? existing;
     for (final entry in entries) {
       if (entry.id == id) {
@@ -313,6 +332,10 @@ class ProjectLibrary {
       if (entity is! Directory) {
         continue;
       }
+      if (_isTombstoneDirectory(entity)) {
+        await _deleteTombstoneBestEffort(entity);
+        continue;
+      }
       final projectFile = File(p.join(entity.path, 'project.bbox.json'));
       if (!await projectFile.exists()) {
         continue;
@@ -320,9 +343,11 @@ class ProjectLibrary {
       try {
         final project = await ProjectStore.load(projectFile.path);
         final timestamp = project.lastSavedAt?.toUtc() ?? _clock().toUtc();
+        final id = p.basename(entity.path);
+        _checkedProjectFilePath(id, project.projectFilePath!);
         entries.add(
           _entryFromProject(
-            id: p.basename(entity.path),
+            id: id,
             project: project,
             createdAt: timestamp,
             updatedAt: timestamp,
@@ -369,6 +394,7 @@ class ProjectLibrary {
     await beforeIndexWrite?.call();
     final file = File(indexFilePath);
     await file.parent.create(recursive: true);
+    await _cleanupStaleIndexBackupsBestEffort();
     const encoder = JsonEncoder.withIndent('  ');
     final temp = File(
       '$indexFilePath.tmp-${DateTime.now().microsecondsSinceEpoch}',
@@ -391,16 +417,15 @@ class ProjectLibrary {
         movedExisting = true;
       }
       await temp.rename(file.path);
-      if (await backup.exists()) await backup.delete();
-    } catch (_) {
+    } catch (error, stackTrace) {
       if (movedExisting && !await file.exists() && await backup.exists()) {
         await backup.rename(file.path);
       }
-      rethrow;
-    } finally {
-      if (await temp.exists()) await temp.delete();
-      if (await backup.exists() && await file.exists()) await backup.delete();
+      await _deleteFileBestEffort(temp);
+      Error.throwWithStackTrace(error, stackTrace);
     }
+    await _deleteIndexBackupBestEffort(backup);
+    await _cleanupStaleIndexBackupsBestEffort();
   }
 
   Future<T> _serialize<T>(String? operation, Future<T> Function() action) {
@@ -412,18 +437,29 @@ class ProjectLibrary {
     return result;
   }
 
-  Directory _checkedProjectDirectory(String projectFilePath) {
+  String _checkedProjectFilePath(String id, String projectFilePath) {
     final root = p.normalize(Directory(projectsRootPath).absolute.path);
-    final directory = Directory(p.dirname(projectFilePath)).absolute;
-    final normalizedDirectory = p.normalize(directory.path);
-    if (!p.isWithin(root, normalizedDirectory)) {
+    final expected = p.normalize(
+      File(p.join(projectsRootPath, id, 'project.bbox.json')).absolute.path,
+    );
+    final normalizedPath = p.normalize(File(projectFilePath).absolute.path);
+    final expectedDirectory = p.dirname(expected);
+    if (!p.isWithin(root, expectedDirectory) ||
+        !p.equals(normalizedPath, expected)) {
       throw StateError('Refusing to mutate outside the project library.');
     }
-    return Directory(normalizedDirectory);
+    return normalizedPath;
   }
 
-  Future<void> _deleteProjectDirectoryIfPresent(Directory directory) async {
-    _checkedProjectDirectory(p.join(directory.path, 'project.bbox.json'));
+  Directory _checkedProjectDirectory(String id, String projectFilePath) {
+    return Directory(p.dirname(_checkedProjectFilePath(id, projectFilePath)));
+  }
+
+  Future<void> _deleteProjectDirectoryIfPresent(
+    String id,
+    Directory directory,
+  ) async {
+    _checkedProjectDirectory(id, p.join(directory.path, 'project.bbox.json'));
     if (await directory.exists()) await directory.delete(recursive: true);
   }
 
@@ -434,11 +470,67 @@ class ProjectLibrary {
       final candidate = Directory(
         p.join(projectsRootPath, '$baseName.deleting-$suffix'),
       ).absolute;
-      _checkedProjectDirectory(p.join(candidate.path, 'project.bbox.json'));
+      _checkedLibraryDirectory(candidate);
       if (!await candidate.exists()) return candidate;
       suffix += 1;
     }
   }
+
+  Directory _checkedLibraryDirectory(Directory directory) {
+    final root = p.normalize(Directory(projectsRootPath).absolute.path);
+    final normalized = p.normalize(directory.absolute.path);
+    if (!p.isWithin(root, normalized)) {
+      throw StateError('Refusing to mutate outside the project library.');
+    }
+    return Directory(normalized);
+  }
+
+  bool _isTombstoneDirectory(Directory directory) =>
+      p.basename(directory.path).contains('.deleting-');
+
+  Future<void> _deleteFileBestEffort(File file) async {
+    try {
+      if (await file.exists()) await file.delete();
+    } catch (_) {
+      // A failed cleanup must not change an already committed index write.
+    }
+  }
+
+  Future<void> _deleteIndexBackupBestEffort(File backup) async {
+    try {
+      if (await backup.exists()) await _deleteIndexBackup(backup);
+    } catch (_) {
+      // Stale backups are retried by later index writes.
+    }
+  }
+
+  Future<void> _cleanupStaleIndexBackupsBestEffort() async {
+    final root = Directory(projectsRootPath);
+    if (!await root.exists()) return;
+    final prefix = '${p.basename(indexFilePath)}.bak-';
+    try {
+      await for (final entity in root.list(followLinks: false)) {
+        if (entity is File && p.basename(entity.path).startsWith(prefix)) {
+          await _deleteIndexBackupBestEffort(entity);
+        }
+      }
+    } catch (_) {
+      // Index writes do not depend on cleanup of older unique backup files.
+    }
+  }
+
+  Future<void> _deleteTombstoneBestEffort(Directory tombstone) async {
+    try {
+      if (await tombstone.exists()) await _deleteTombstone(tombstone);
+    } catch (_) {
+      // Tombstones are excluded from rebuilds and may be cleaned up later.
+    }
+  }
+
+  static Future<void> _deleteFile(File file) => file.delete();
+
+  static Future<void> _deleteDirectory(Directory directory) =>
+      directory.delete(recursive: true);
 
   static List<ProjectLibraryEntry> _sorted(List<ProjectLibraryEntry> entries) {
     return [...entries]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
