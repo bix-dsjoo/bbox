@@ -88,33 +88,32 @@ class _InspectorPanelState extends State<_InspectorPanel> {
                   const SizedBox(height: 12),
                   Expanded(
                     child: _selectedTab == _InspectorPanelTab.work
-                        ? Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              if (selectedBox != null) ...[
-                                const _SectionTitle(WorkbenchCopy.details),
-                                const SizedBox(height: 8),
-                                _SelectedBoxDetails(
-                                  project: project,
-                                  box: selectedBox,
-                                  displayNumber: _boxDisplayNumber(
-                                    boxDisplayNumbers,
-                                    selectedBox,
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                              ],
-                              Expanded(
-                                child: SingleChildScrollView(
-                                  key: const ValueKey('sidebar-box-scroll'),
-                                  child: _SidebarBoxList(
+                        ? SingleChildScrollView(
+                            key: const ValueKey('sidebar-box-scroll'),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                if (selectedBox != null) ...[
+                                  const _SectionTitle(WorkbenchCopy.details),
+                                  const SizedBox(height: 8),
+                                  _SelectedBoxDetails(
                                     controller: controller,
                                     project: project,
-                                    image: image,
+                                    box: selectedBox,
+                                    displayNumber: _boxDisplayNumber(
+                                      boxDisplayNumbers,
+                                      selectedBox,
+                                    ),
                                   ),
+                                  const SizedBox(height: 12),
+                                ],
+                                _SidebarBoxList(
+                                  controller: controller,
+                                  project: project,
+                                  image: image,
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           )
                         : _BoxTableView(
                             controller: controller,
@@ -696,9 +695,10 @@ class _BoxRow extends StatelessWidget {
           };
     final title = box.requiresLabelReview
         ? '${label?.name ?? WorkbenchCopy.unlabeledBox} · '
-              '${WorkbenchCopy.reviewRequired}'
+              '${WorkbenchCopy.suggestionReviewRequired}'
         : switch (rowState) {
-            _SidebarBoxRowState.unlabeled => WorkbenchCopy.unlabeledBox,
+            _SidebarBoxRowState.unlabeled =>
+              WorkbenchCopy.labelSelectionRequired,
             _SidebarBoxRowState.labeled =>
               label?.name ?? WorkbenchCopy.unlabeledBox,
             _SidebarBoxRowState.invalid => WorkbenchCopy.error,
@@ -752,11 +752,13 @@ class _BoxRow extends StatelessWidget {
 
 class _SelectedBoxDetails extends StatelessWidget {
   const _SelectedBoxDetails({
+    required this.controller,
     required this.project,
     required this.box,
     required this.displayNumber,
   });
 
+  final AppController controller;
   final AnnotationProject project;
   final BoundingBox box;
   final int displayNumber;
@@ -774,55 +776,49 @@ class _SelectedBoxDetails extends StatelessWidget {
         borderRadius: BorderRadius.circular(AppRadii.row),
         border: Border.all(color: Theme.of(context).dividerColor),
       ),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: box.requiresLabelReview ? 126 : double.infinity,
-        ),
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.all(10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        WorkbenchCopy.selectedBoxDisplayTitle(
-                          displayNumber,
-                          label,
-                        ),
-                        key: const ValueKey('selected-box-display-title'),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
+                Expanded(
+                  child: Text(
+                    WorkbenchCopy.selectedBoxDisplayTitle(displayNumber, label),
+                    key: const ValueKey('selected-box-display-title'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
                     ),
-                    const SizedBox(width: 8),
-                    _BoxAutomationStatus(box: box),
-                  ],
+                  ),
                 ),
-                if (box.requiresLabelReview) ...[
-                  const SizedBox(height: 8),
-                  _ReviewEvidence(project: project, metadata: box.automation!),
-                ],
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 10,
-                  runSpacing: 6,
-                  children: [
-                    Text('x ${box.x.toStringAsFixed(0)}'),
-                    Text('y ${box.y.toStringAsFixed(0)}'),
-                    Text('w ${box.width.toStringAsFixed(0)}'),
-                    Text('h ${box.height.toStringAsFixed(0)}'),
-                    Text('area ${box.area.toStringAsFixed(0)}'),
-                  ],
-                ),
+                const SizedBox(width: 8),
+                _BoxAutomationStatus(box: box),
               ],
             ),
-          ),
+            if (box.requiresLabelReview) ...[
+              const SizedBox(height: 8),
+              _ReviewEvidence(
+                controller: controller,
+                project: project,
+                metadata: box.automation!,
+              ),
+            ],
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 10,
+              runSpacing: 6,
+              children: [
+                Text('x ${box.x.toStringAsFixed(0)}'),
+                Text('y ${box.y.toStringAsFixed(0)}'),
+                Text('w ${box.width.toStringAsFixed(0)}'),
+                Text('h ${box.height.toStringAsFixed(0)}'),
+                Text('area ${box.area.toStringAsFixed(0)}'),
+              ],
+            ),
+          ],
         ),
       ),
     );
@@ -877,13 +873,19 @@ class _BoxAutomationStatus extends StatelessWidget {
 }
 
 class _ReviewEvidence extends StatelessWidget {
-  const _ReviewEvidence({required this.project, required this.metadata});
+  const _ReviewEvidence({
+    required this.controller,
+    required this.project,
+    required this.metadata,
+  });
 
+  final AppController controller;
   final AnnotationProject project;
   final BoxAutomationMetadata metadata;
 
   @override
   Widget build(BuildContext context) {
+    final candidates = controller.selectedReviewCandidates;
     return DecoratedBox(
       decoration: BoxDecoration(
         color: WorkbenchPalette.dangerSoft.withAlpha(110),
@@ -903,11 +905,47 @@ class _ReviewEvidence extends StatelessWidget {
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ),
-            if (metadata.candidates.isNotEmpty) ...[
+            const SizedBox(height: 7),
+            Text(
+              WorkbenchCopy.chooseReviewCandidate,
+              style: Theme.of(
+                context,
+              ).textTheme.labelMedium?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            if (candidates.isEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                WorkbenchCopy.noReviewCandidates,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+              ),
               const SizedBox(height: 3),
-              for (final candidate in metadata.candidates.take(3))
-                _CandidateScoreRow(project: project, candidate: candidate),
+              Text(
+                WorkbenchCopy.noReviewCandidatesHint,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ] else ...[
+              const SizedBox(height: 5),
+              for (final candidate in candidates)
+                _CandidateScoreRow(
+                  controller: controller,
+                  project: project,
+                  candidate: candidate,
+                ),
             ],
+            const SizedBox(height: 9),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                key: const ValueKey('apply-review-candidate'),
+                onPressed: controller.selectedReviewCandidateLabelId == null
+                    ? null
+                    : controller.applySelectedReviewCandidate,
+                icon: const Icon(Icons.keyboard_return, size: 16),
+                label: const Text(WorkbenchCopy.applyReviewCandidate),
+              ),
+            ),
           ],
         ),
       ),
@@ -916,44 +954,92 @@ class _ReviewEvidence extends StatelessWidget {
 }
 
 class _CandidateScoreRow extends StatelessWidget {
-  const _CandidateScoreRow({required this.project, required this.candidate});
+  const _CandidateScoreRow({
+    required this.controller,
+    required this.project,
+    required this.candidate,
+  });
 
+  final AppController controller;
   final AnnotationProject project;
   final LabelCandidate candidate;
 
   @override
   Widget build(BuildContext context) {
     final label = _labelFor(project, candidate.labelId);
+    final selected =
+        controller.selectedReviewCandidateLabelId == candidate.labelId;
+    final colorScheme = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.only(top: 3),
-      child: Row(
-        children: [
-          Container(
-            width: 7,
-            height: 7,
-            decoration: BoxDecoration(
-              color: label == null
-                  ? WorkbenchPalette.mutedForeground
-                  : Color(label.color),
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              label?.name ?? '#${candidate.labelId}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ),
-          Text(
+      child: Semantics(
+        button: true,
+        selected: selected,
+        label:
+            '${label?.name ?? '#${candidate.labelId}'}, '
             '${(candidate.score * 100).round()}%',
-            style: Theme.of(
-              context,
-            ).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w800),
+        child: Material(
+          color: selected
+              ? colorScheme.primary.withAlpha(24)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(AppRadii.row),
+          child: InkWell(
+            key: ValueKey('review-candidate-${candidate.labelId}'),
+            borderRadius: BorderRadius.circular(AppRadii.row),
+            onTap: controller.isAutomationRunning
+                ? null
+                : () => controller.selectReviewCandidate(candidate.labelId),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 8),
+              child: Row(
+                children: [
+                  Icon(
+                    selected
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_unchecked,
+                    size: 18,
+                    color: selected
+                        ? colorScheme.primary
+                        : colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: label == null
+                          ? WorkbenchPalette.mutedForeground
+                          : Color(label.color),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      label?.name ?? '#${candidate.labelId}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontWeight: selected
+                            ? FontWeight.w800
+                            : FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${(candidate.score * 100).round()}%',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: selected
+                          ? colorScheme.primary
+                          : colorScheme.onSurface,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
-        ],
+        ),
       ),
     );
   }

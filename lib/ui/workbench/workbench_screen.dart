@@ -581,10 +581,19 @@ class WorkbenchScreen extends StatelessWidget {
     if (_keyboardModifierPressed()) {
       return KeyEventResult.ignored;
     }
-    if (event.logicalKey == LogicalKeyboardKey.enter &&
-        controller.selectedBox?.requiresLabelReview == true) {
-      controller.acceptSelectedSuggestedLabel();
-      return KeyEventResult.handled;
+    if (controller.selectedBox?.requiresLabelReview == true) {
+      if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+        controller.moveReviewCandidate(-1);
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+        controller.moveReviewCandidate(1);
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.enter) {
+        controller.applySelectedReviewCandidate();
+        return KeyEventResult.handled;
+      }
     }
     final shortcut = _shortcutForKey(event.logicalKey);
     if (shortcut == null || controller.selectedBoxId == null) {

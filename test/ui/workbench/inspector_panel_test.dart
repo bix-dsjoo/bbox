@@ -548,7 +548,7 @@ void main() {
       expect(find.byKey(const ValueKey('selected-box-box-1')), findsOneWidget);
     });
 
-    testWidgets('right sidebar hides automatic box origin in box rows', (
+    testWidgets('right sidebar uses actionable label status in box rows', (
       tester,
     ) async {
       final controller = AppController();
@@ -567,7 +567,19 @@ void main() {
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('box-row-box-1')),
-          matching: find.textContaining(WorkbenchCopy.unlabeledBox),
+          matching: find.textContaining(WorkbenchCopy.labelSelectionRequired),
+        ),
+        findsOneWidget,
+      );
+
+      final fixture = _reviewCandidateProject();
+      controller.loadProject(fixture);
+      await tester.pump();
+
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('box-row-review-box')),
+          matching: find.textContaining(WorkbenchCopy.suggestionReviewRequired),
         ),
         findsOneWidget,
       );
@@ -743,55 +755,134 @@ void main() {
       expect(find.textContaining('h 20'), findsWidgets);
     });
 
-    testWidgets('review details show suggestion candidates and reason', (
+    testWidgets(
+      'review details expose selectable candidates and apply action',
+      (tester) async {
+        final controller = AppController()
+          ..loadProject(_reviewCandidateProject())
+          ..selectBox('review-box');
+
+        await tester.pumpWidget(app(controller));
+
+        final details = find.byKey(const ValueKey('selected-box-details'));
+        expect(
+          find.descendant(
+            of: details,
+            matching: find.text(WorkbenchCopy.reviewRequired),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: details,
+            matching: find.text(WorkbenchCopy.reviewReasonClassifierAmbiguous),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: details, matching: find.text('Person')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: details, matching: find.text('58%')),
+          findsOneWidget,
+        );
+        expect(find.text(WorkbenchCopy.chooseReviewCandidate), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('review-candidate-1')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('review-candidate-2')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('apply-review-candidate')),
+          findsOneWidget,
+        );
+
+        await tapVisible(
+          tester,
+          find.byKey(const ValueKey('review-candidate-2')),
+        );
+        expect(controller.selectedReviewCandidateLabelId, 2);
+        final selectedCandidateSemantics = tester.getSemantics(
+          find.byKey(const ValueKey('review-candidate-2')),
+        );
+        expect(selectedCandidateSemantics.flagsCollection.isButton, isTrue);
+        expect(
+          selectedCandidateSemantics.flagsCollection.isSelected,
+          Tristate.isTrue,
+        );
+        expect(selectedCandidateSemantics.label, contains('Label 2'));
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+
+        final applied = controller.project!.images.first.boxes.firstWhere(
+          (box) => box.id == 'review-box',
+        );
+        expect(applied.labelId, 2);
+        expect(applied.labelSource, LabelSource.user);
+        expect(controller.selectedBoxId, 'visual-next-unlabeled-box');
+      },
+    );
+
+    testWidgets(
+      'review details guide quick labeling when candidates are empty',
+      (tester) async {
+        final fixture = _reviewCandidateProject();
+        final reviewBox = fixture.images.first.boxes.first.copyWith(
+          automation: fixture.images.first.boxes.first.automation!.copyWith(
+            candidates: const [],
+          ),
+        );
+        final controller = AppController()
+          ..loadProject(
+            fixture.copyWith(
+              images: [
+                fixture.images.first.copyWith(boxes: [reviewBox]),
+              ],
+            ),
+          )
+          ..selectBox('review-box');
+
+        await tester.pumpWidget(app(controller));
+
+        expect(find.text(WorkbenchCopy.noReviewCandidates), findsOneWidget);
+        expect(find.text(WorkbenchCopy.noReviewCandidatesHint), findsOneWidget);
+      },
+    );
+
+    testWidgets('review apply action scrolls into view at 1280 by 720', (
       tester,
     ) async {
-      final reviewBox = project().images.first.boxes.single.copyWith(
-        automation: const BoxAutomationMetadata(
-          suggestedLabelId: 1,
-          candidates: [LabelCandidate(labelId: 1, score: 0.58)],
-          reviewReasons: ['low_margin'],
-          pipelineVersion: 'test-v1',
-          policyVersion: 'test-policy-v1',
-          detectorSha256: 'detector-hash',
-        ),
-      );
+      await tester.binding.setSurfaceSize(const Size(1280, 720));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       final controller = AppController()
-        ..loadProject(
-          project().copyWith(
-            images: [
-              project().images.first.copyWith(boxes: [reviewBox]),
-              project().images.last,
-            ],
-          ),
-        )
-        ..selectBox('box-1');
+        ..loadProject(_reviewCandidateProject(candidateCount: 12))
+        ..selectBox('review-box');
 
       await tester.pumpWidget(app(controller));
 
-      final details = find.byKey(const ValueKey('selected-box-details'));
+      final applyAction = find.byKey(const ValueKey('apply-review-candidate'));
+      final scroll = find.byKey(const ValueKey('sidebar-box-scroll'));
+      expect(applyAction, findsOneWidget);
       expect(
-        find.descendant(
-          of: details,
-          matching: find.text(WorkbenchCopy.reviewRequired),
-        ),
+        find.descendant(of: scroll, matching: applyAction),
         findsOneWidget,
       );
-      expect(
-        find.descendant(
-          of: details,
-          matching: find.text(WorkbenchCopy.reviewReasonClassifierAmbiguous),
-        ),
-        findsOneWidget,
+
+      await tester.ensureVisible(applyAction);
+      await tester.pumpAndSettle();
+
+      final applyRect = tester.getRect(applyAction);
+      final inspectorRect = tester.getRect(
+        find.byKey(const ValueKey('inspector-panel')),
       );
-      expect(
-        find.descendant(of: details, matching: find.text('Person')),
-        findsWidgets,
-      );
-      expect(
-        find.descendant(of: details, matching: find.text('58%')),
-        findsOneWidget,
-      );
+      expect(applyRect.top, greaterThanOrEqualTo(inspectorRect.top));
+      expect(applyRect.bottom, lessThanOrEqualTo(inspectorRect.bottom));
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets(
@@ -842,25 +933,22 @@ void main() {
       },
     );
 
-    testWidgets('selected box details stay above the scrollable box list', (
-      tester,
-    ) async {
-      final controller = AppController();
-      controller.loadProject(manyLabeledBoxesProject());
-      controller.selectBox('box-12');
+    testWidgets(
+      'selected box details share one scroll area with the box list',
+      (tester) async {
+        final controller = AppController();
+        controller.loadProject(manyLabeledBoxesProject());
+        controller.selectBox('box-12');
 
-      await tester.pumpWidget(app(controller));
+        await tester.pumpWidget(app(controller));
 
-      final details = find.byKey(const ValueKey('selected-box-details'));
-      final scroll = find.byKey(const ValueKey('sidebar-box-scroll'));
+        final details = find.byKey(const ValueKey('selected-box-details'));
+        final scroll = find.byKey(const ValueKey('sidebar-box-scroll'));
 
-      expect(details, findsOneWidget);
-      expect(find.descendant(of: scroll, matching: details), findsNothing);
-      expect(
-        tester.getTopLeft(details).dy,
-        lessThan(tester.getTopLeft(scroll).dy),
-      );
-    });
+        expect(details, findsOneWidget);
+        expect(find.descendant(of: scroll, matching: details), findsOneWidget);
+      },
+    );
 
     testWidgets('right sidebar pins completion action below box scrolling', (
       tester,
@@ -951,4 +1039,67 @@ void main() {
       );
     });
   });
+}
+
+AnnotationProject _reviewCandidateProject({int candidateCount = 2}) {
+  final labels = List<LabelClass>.generate(
+    candidateCount,
+    (index) => LabelClass(
+      id: index + 1,
+      name: index == 0 ? 'Person' : 'Label ${index + 1}',
+      color: 0xffe64a19 + index,
+    ),
+  );
+  final candidates = List<LabelCandidate>.generate(
+    candidateCount,
+    (index) => LabelCandidate(
+      labelId: index + 1,
+      score: index == 0 ? 0.58 : (0.42 / index),
+    ),
+  );
+  return AnnotationProject.empty(name: 'review-candidates').copyWith(
+    status: ProjectStatus.ready,
+    labels: labels,
+    images: [
+      AnnotatedImage(
+        id: 1,
+        sourcePath: 'review.jpg',
+        displayName: 'review.jpg',
+        width: 100,
+        height: 80,
+        status: ImageStatus.needsReview,
+        boxes: [
+          BoundingBox(
+            id: 'review-box',
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 20,
+            status: BoxStatus.proposal,
+            automation: BoxAutomationMetadata(
+              suggestedLabelId: 1,
+              candidates: candidates,
+              reviewReasons: const [
+                'low_margin',
+                'verifier_failed',
+                'edge_clipped',
+                'possible_duplicate',
+              ],
+              pipelineVersion: 'test-v1',
+              policyVersion: 'test-policy-v1',
+              detectorSha256: 'detector-hash',
+            ),
+          ),
+          const BoundingBox(
+            id: 'visual-next-unlabeled-box',
+            x: 40,
+            y: 10,
+            width: 20,
+            height: 20,
+            status: BoxStatus.proposal,
+          ),
+        ],
+      ),
+    ],
+  );
 }

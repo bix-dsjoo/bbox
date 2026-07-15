@@ -129,6 +129,12 @@ class WorkbenchCopy {
   static const cancelAutoBoxes = '자동 박스 취소';
   static const automaticLabel = '자동 라벨';
   static const reviewRequired = '검토 필요';
+  static const chooseReviewCandidate = '추천 라벨을 선택하고 Enter를 누르세요';
+  static const applyReviewCandidate = '선택한 라벨 적용 · Enter';
+  static const noReviewCandidates = '추천 결과 없음';
+  static const noReviewCandidatesHint = '빠른 라벨 버튼 또는 단축키로 라벨을 선택하세요.';
+  static const labelSelectionRequired = '라벨 선택 필요';
+  static const suggestionReviewRequired = '추천 검토 필요';
   static const unclassified = '미분류';
   static const assignedLabel = '라벨 지정';
   static const reviewReasonClassifierAmbiguous = '분류 결과가 애매합니다.';

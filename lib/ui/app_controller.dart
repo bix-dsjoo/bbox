@@ -89,6 +89,7 @@ class AppController extends ChangeNotifier {
   AnnotationProject? _project;
   int? _selectedImageId;
   String? _selectedBoxId;
+  int? _selectedReviewCandidateLabelId;
   Object? lastError;
   Future<void> _autoSaveChain = Future<void>.value();
   int _pendingAutoSaveCount = 0;
@@ -150,6 +151,8 @@ class AppController extends ChangeNotifier {
   int? get selectedImageId => _selectedImageId;
 
   String? get selectedBoxId => _selectedBoxId;
+
+  int? get selectedReviewCandidateLabelId => _selectedReviewCandidateLabelId;
 
   bool get hasProject => _project != null;
 
@@ -221,6 +224,17 @@ class AppController extends ChangeNotifier {
     return null;
   }
 
+  List<LabelCandidate> get selectedReviewCandidates {
+    final candidates =
+        selectedBox?.automation?.candidates ?? const <LabelCandidate>[];
+    final validIds =
+        _project?.labels.map((label) => label.id).toSet() ?? const <int>{};
+    return [
+      for (final candidate in candidates)
+        if (validIds.contains(candidate.labelId)) candidate,
+    ];
+  }
+
   bool get canConfirmSelectedImage {
     final image = selectedImage;
     return image != null && AnnotationRules.canConfirm(image);
@@ -277,6 +291,7 @@ class AppController extends ChangeNotifier {
     _currentLibraryProjectId = _libraryProjectIdForPath(projectFilePath);
     _selectedImageId = null;
     _selectedBoxId = null;
+    _syncSelectedReviewCandidate();
     _projectActivity = ProjectActivity.idle;
     _imageImportProgress = null;
     _imageViewLoadState = const ImageViewLoadState();
@@ -302,6 +317,7 @@ class AppController extends ChangeNotifier {
         ? null
         : _project!.images.first.id;
     _selectedBoxId = null;
+    _syncSelectedReviewCandidate();
     _projectActivity = ProjectActivity.idle;
     _imageImportProgress = null;
     _imageViewLoadState = ImageViewLoadState(
@@ -349,6 +365,7 @@ class AppController extends ChangeNotifier {
     );
     _selectedImageId = null;
     _selectedBoxId = null;
+    _syncSelectedReviewCandidate();
     _projectActivity = ProjectActivity.idle;
     _imageImportProgress = null;
     _imageViewLoadState = const ImageViewLoadState();
@@ -405,6 +422,7 @@ class AppController extends ChangeNotifier {
       _currentLibraryProjectId = null;
       _selectedImageId = null;
       _selectedBoxId = null;
+      _syncSelectedReviewCandidate();
       _undoStack.clear();
       _redoStack.clear();
       _projectActivity = ProjectActivity.idle;
@@ -842,6 +860,7 @@ class AppController extends ChangeNotifier {
   void selectImage(int imageId) {
     _selectedImageId = imageId;
     _selectedBoxId = null;
+    _syncSelectedReviewCandidate();
     _imageViewLoadState = ImageViewLoadState(
       imageId: imageId,
       isLoading: false,
@@ -851,6 +870,7 @@ class AppController extends ChangeNotifier {
 
   void selectBox(String? boxId) {
     _selectedBoxId = boxId;
+    _syncSelectedReviewCandidate();
     notifyListeners();
   }
 
@@ -885,6 +905,7 @@ class AppController extends ChangeNotifier {
       ),
     );
     _selectedBoxId = box.id;
+    _syncSelectedReviewCandidate();
     _scheduleAutoSave();
     notifyListeners();
     scheduleSelectedBoxClassification();
@@ -939,6 +960,7 @@ class AppController extends ChangeNotifier {
     _recordUndo();
     _replaceSelectedImage(AnnotationRules.deleteBox(image, boxId: boxId));
     _selectedBoxId = null;
+    _syncSelectedReviewCandidate();
     _scheduleAutoSave();
     notifyListeners();
   }
@@ -1042,6 +1064,7 @@ class AppController extends ChangeNotifier {
       if (result.errorMessage != null) {
         _project = previousProject;
         _selectedBoxId = previousSelectedBoxId;
+        _syncSelectedReviewCandidate();
         lastError = result.errorMessage;
         lastUserMessage = WorkbenchCopy.autoBoxesFailed;
         return;
@@ -1071,6 +1094,7 @@ class AppController extends ChangeNotifier {
       _selectedBoxId = updated.visibleBoxes.isEmpty
           ? null
           : updated.visibleBoxes.first.id;
+      _syncSelectedReviewCandidate();
       lastUserMessage = detectedBoxes.isEmpty
           ? WorkbenchCopy.autoBoxesEmpty
           : WorkbenchCopy.autoBoxesCreated(detectedBoxes.length);
@@ -1087,6 +1111,7 @@ class AppController extends ChangeNotifier {
       }
       _project = previousProject;
       _selectedBoxId = previousSelectedBoxId;
+      _syncSelectedReviewCandidate();
       if (error is AutoBoxCancelledException) {
         lastError = null;
         lastUserMessage = WorkbenchCopy.autoBoxesCancelled;
@@ -1110,22 +1135,37 @@ class AppController extends ChangeNotifier {
   }
 
   void acceptSelectedSuggestedLabel() {
-    final image = selectedImage;
-    final boxId = selectedBoxId;
-    if (image == null ||
-        boxId == null ||
-        selectedBox?.requiresLabelReview != true) {
+    final suggestion = selectedBox?.automation?.suggestedLabelId;
+    if (selectedBox?.requiresLabelReview != true || suggestion == null) return;
+    assignSelectedBoxLabel(suggestion);
+  }
+
+  void selectReviewCandidate(int labelId) {
+    if (!selectedReviewCandidates.any(
+      (candidate) => candidate.labelId == labelId,
+    )) {
       return;
     }
-    _recordUndo();
-    _replaceSelectedImage(
-      AnnotationRules.acceptSuggestedLabel(
-        image,
-        boxId: boxId,
-      ).copyWith(status: ImageStatus.needsReview),
-    );
-    _scheduleAutoSave();
+    _selectedReviewCandidateLabelId = labelId;
     notifyListeners();
+  }
+
+  void moveReviewCandidate(int delta) {
+    final candidates = selectedReviewCandidates;
+    if (candidates.isEmpty) return;
+    final current = candidates.indexWhere(
+      (candidate) => candidate.labelId == _selectedReviewCandidateLabelId,
+    );
+    final next = ((current < 0 ? 0 : current) + delta)
+        .clamp(0, candidates.length - 1)
+        .toInt();
+    selectReviewCandidate(candidates[next].labelId);
+  }
+
+  void applySelectedReviewCandidate() {
+    final labelId = _selectedReviewCandidateLabelId;
+    if (labelId == null) return;
+    assignSelectedBoxLabel(labelId);
   }
 
   void scheduleSelectedBoxClassification({String? pipelineVersion}) {
@@ -1324,6 +1364,7 @@ class AppController extends ChangeNotifier {
         ],
       ),
     );
+    _syncSelectedReviewCandidate();
     _scheduleAutoSave();
     notifyListeners();
   }
@@ -1342,6 +1383,7 @@ class AppController extends ChangeNotifier {
       ),
     );
     _selectedBoxId = null;
+    _syncSelectedReviewCandidate();
     _scheduleAutoSave();
     notifyListeners();
   }
@@ -1395,6 +1437,7 @@ class AppController extends ChangeNotifier {
     _replaceSelectedImage(updatedImage);
     _selectedBoxId =
         nextBoxNeedingLabelId(updatedImage, afterBoxId: boxId) ?? boxId;
+    _syncSelectedReviewCandidate();
     _scheduleAutoSave();
     notifyListeners();
   }
@@ -1431,6 +1474,7 @@ class AppController extends ChangeNotifier {
       _selectedBoxId = null;
       lastUserMessage = WorkbenchCopy.allWorkImagesCompleted;
     }
+    _syncSelectedReviewCandidate();
     _scheduleAutoSave();
     notifyListeners();
   }
@@ -1498,6 +1542,7 @@ class AppController extends ChangeNotifier {
     _currentLibraryProjectId = null;
     _selectedImageId = null;
     _selectedBoxId = null;
+    _syncSelectedReviewCandidate();
     _projectActivity = ProjectActivity.idle;
     _imageImportProgress = null;
     _imageViewLoadState = const ImageViewLoadState();
@@ -1640,6 +1685,7 @@ class AppController extends ChangeNotifier {
       _selectedImageId = null;
       _selectedBoxId = null;
       _imageViewLoadState = const ImageViewLoadState();
+      _syncSelectedReviewCandidate();
       return;
     }
     final imageExists = project.images.any(
@@ -1659,6 +1705,7 @@ class AppController extends ChangeNotifier {
     if (!boxExists) {
       _selectedBoxId = null;
     }
+    _syncSelectedReviewCandidate();
   }
 
   void _repairSelectionAfterImport(List<AnnotatedImage> importedImages) {
@@ -1669,6 +1716,7 @@ class AppController extends ChangeNotifier {
         imageId: _selectedImageId,
         isLoading: false,
       );
+      _syncSelectedReviewCandidate();
       return;
     }
     _repairSelection();
@@ -1680,6 +1728,7 @@ class AppController extends ChangeNotifier {
       _selectedImageId = null;
       _selectedBoxId = null;
       _imageViewLoadState = const ImageViewLoadState();
+      _syncSelectedReviewCandidate();
       return;
     }
     final imageExists = project.images.any(
@@ -1692,8 +1741,23 @@ class AppController extends ChangeNotifier {
         imageId: _selectedImageId,
         isLoading: false,
       );
+      _syncSelectedReviewCandidate();
       return;
     }
+    _syncSelectedReviewCandidate();
+  }
+
+  void _syncSelectedReviewCandidate() {
+    final candidates = selectedReviewCandidates;
+    if (candidates.isNotEmpty) {
+      _selectedReviewCandidateLabelId = candidates.first.labelId;
+      return;
+    }
+    final suggestion = selectedBox?.automation?.suggestedLabelId;
+    final validSuggestion =
+        suggestion != null &&
+        (_project?.labels.any((label) => label.id == suggestion) ?? false);
+    _selectedReviewCandidateLabelId = validSuggestion ? suggestion : null;
   }
 
   void _replaceSelectedImage(AnnotatedImage updatedImage) {
@@ -1878,6 +1942,7 @@ class AppController extends ChangeNotifier {
         ],
       ),
     );
+    _syncSelectedReviewCandidate();
     _scheduleAutoSave();
     notifyListeners();
     if (shouldReclassify) {

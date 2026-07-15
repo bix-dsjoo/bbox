@@ -371,12 +371,76 @@ void main() {
       expect(controller.selectedImage!.visibleBoxes.single.id, 'box-1');
     });
 
-    testWidgets('enter accepts the selected red label suggestion', (
+    testWidgets('arrow down then enter applies the selected review candidate', (
       tester,
     ) async {
       final suggestedBox = project().images.first.boxes.single.copyWith(
         automation: const BoxAutomationMetadata(
           suggestedLabelId: 1,
+          candidates: [
+            LabelCandidate(labelId: 1, score: 0.58),
+            LabelCandidate(labelId: 2, score: 0.42),
+          ],
+          reviewReasons: ['low_margin'],
+          pipelineVersion: 'test-v1',
+          policyVersion: 'test-policy-v1',
+          detectorSha256: 'detector-hash',
+        ),
+      );
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(
+          project().copyWith(
+            labels: const [
+              LabelClass(
+                id: 1,
+                name: 'Person',
+                color: 0xffe64a19,
+                shortcut: '1',
+              ),
+              LabelClass(
+                id: 2,
+                name: 'Pastry',
+                color: 0xff006699,
+                shortcut: '2',
+              ),
+            ],
+            images: [
+              project().images.first.copyWith(boxes: [suggestedBox]),
+              project().images.last,
+            ],
+          ),
+        )
+        ..selectBox('box-1');
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(app(controller));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      expect(controller.selectedReviewCandidateLabelId, 2);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pump();
+      expect(controller.selectedReviewCandidateLabelId, 1);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      expect(controller.selectedReviewCandidateLabelId, 2);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+
+      expect(controller.selectedBox!.status, BoxStatus.labeled);
+      expect(controller.selectedBox!.labelId, 2);
+      expect(controller.selectedBox!.labelSource, LabelSource.user);
+    });
+
+    testWidgets('review keys do not apply while a text input has focus', (
+      tester,
+    ) async {
+      final suggestedBox = project().images.first.boxes.single.copyWith(
+        automation: const BoxAutomationMetadata(
+          suggestedLabelId: 1,
+          candidates: [LabelCandidate(labelId: 1, score: 1)],
           reviewReasons: ['low_margin'],
           pipelineVersion: 'test-v1',
           policyVersion: 'test-policy-v1',
@@ -396,12 +460,19 @@ void main() {
       addTearDown(controller.dispose);
 
       await tester.pumpWidget(app(controller));
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('open-label-management')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('label-name-input')));
+      await tester.pump();
+
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pump();
 
-      expect(controller.selectedBox!.status, BoxStatus.labeled);
-      expect(controller.selectedBox!.labelId, 1);
-      expect(controller.selectedBox!.labelSource, LabelSource.user);
+      expect(controller.selectedBox!.status, BoxStatus.proposal);
+      expect(controller.selectedBox!.labelId, isNull);
     });
 
     testWidgets(

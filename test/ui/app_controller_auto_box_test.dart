@@ -108,6 +108,191 @@ void main() {
     expect(controller.canUndo, isTrue);
   });
 
+  test('review candidate selection applies the chosen label and advances', () {
+    final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+      ..loadProject(_reviewCandidateProject())
+      ..selectBox('review-box');
+    addTearDown(controller.dispose);
+
+    expect(controller.selectedReviewCandidateLabelId, 1);
+    expect(
+      controller.selectedReviewCandidates.map((candidate) => candidate.labelId),
+      [1, 2],
+    );
+
+    controller.selectReviewCandidate(999);
+    expect(controller.selectedReviewCandidateLabelId, 1);
+
+    controller.moveReviewCandidate(1);
+    expect(controller.selectedReviewCandidateLabelId, 2);
+
+    controller.applySelectedReviewCandidate();
+
+    final applied = controller.project!.images.first.boxes.firstWhere(
+      (box) => box.id == 'review-box',
+    );
+    expect(applied.status, BoxStatus.labeled);
+    expect(applied.labelId, 2);
+    expect(applied.labelSource, LabelSource.user);
+    expect(controller.selectedBoxId, 'visual-next-unlabeled-box');
+    expect(controller.selectedReviewCandidateLabelId, isNull);
+  });
+
+  test('selecting another review box resets to its first valid candidate', () {
+    final project = _reviewCandidateProject();
+    final secondReviewBox = project.images.first.boxes.last.copyWith(
+      automation: const BoxAutomationMetadata(
+        suggestedLabelId: 2,
+        candidates: [
+          LabelCandidate(labelId: 2, score: 0.81),
+          LabelCandidate(labelId: 1, score: 0.19),
+        ],
+        reviewReasons: ['low_margin'],
+        pipelineVersion: 'test-v1',
+        policyVersion: 'test-policy-v1',
+        detectorSha256: 'detector-hash',
+      ),
+    );
+    final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+      ..loadProject(
+        project.copyWith(
+          images: [
+            project.images.first.copyWith(
+              boxes: [project.images.first.boxes.first, secondReviewBox],
+            ),
+          ],
+        ),
+      )
+      ..selectBox('review-box');
+    addTearDown(controller.dispose);
+
+    controller.moveReviewCandidate(1);
+    expect(controller.selectedReviewCandidateLabelId, 2);
+
+    controller.selectBox('visual-next-unlabeled-box');
+    expect(controller.selectedReviewCandidateLabelId, 2);
+
+    controller.selectBox('review-box');
+    expect(controller.selectedReviewCandidateLabelId, 1);
+  });
+
+  test(
+    'review candidate selection ignores labels missing from the project',
+    () {
+      final project = _reviewCandidateProject();
+      final reviewBox = project.images.first.boxes.first.copyWith(
+        automation: const BoxAutomationMetadata(
+          suggestedLabelId: 999,
+          candidates: [
+            LabelCandidate(labelId: 999, score: 0.9),
+            LabelCandidate(labelId: 2, score: 0.1),
+          ],
+          reviewReasons: ['low_margin'],
+          pipelineVersion: 'test-v1',
+          policyVersion: 'test-policy-v1',
+          detectorSha256: 'detector-hash',
+        ),
+      );
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(
+          project.copyWith(
+            images: [
+              project.images.first.copyWith(boxes: [reviewBox]),
+            ],
+          ),
+        )
+        ..selectBox('review-box');
+      addTearDown(controller.dispose);
+
+      expect(
+        controller.selectedReviewCandidates.map(
+          (candidate) => candidate.labelId,
+        ),
+        [2],
+      );
+      expect(controller.selectedReviewCandidateLabelId, 2);
+
+      controller.selectReviewCandidate(999);
+      expect(controller.selectedReviewCandidateLabelId, 2);
+
+      controller.loadProject(
+        project.copyWith(
+          images: [
+            project.images.first.copyWith(
+              boxes: [
+                reviewBox.copyWith(
+                  automation: reviewBox.automation!.copyWith(
+                    candidates: const [LabelCandidate(labelId: 999, score: 1)],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      controller.selectBox('review-box');
+
+      expect(controller.selectedReviewCandidates, isEmpty);
+      expect(controller.selectedReviewCandidateLabelId, isNull);
+    },
+  );
+
+  test(
+    'review candidate state stays synchronized through assignment history and deletion',
+    () {
+      final project = _reviewCandidateProject();
+      final nextReviewBox = project.images.first.boxes.last.copyWith(
+        automation: const BoxAutomationMetadata(
+          suggestedLabelId: 1,
+          candidates: [
+            LabelCandidate(labelId: 1, score: 0.75),
+            LabelCandidate(labelId: 2, score: 0.25),
+          ],
+          reviewReasons: ['low_margin'],
+          pipelineVersion: 'test-v1',
+          policyVersion: 'test-policy-v1',
+          detectorSha256: 'detector-hash',
+        ),
+      );
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(
+          project.copyWith(
+            images: [
+              project.images.first.copyWith(
+                boxes: [project.images.first.boxes.first, nextReviewBox],
+              ),
+            ],
+          ),
+        )
+        ..selectBox('review-box');
+      addTearDown(controller.dispose);
+
+      controller.moveReviewCandidate(1);
+      controller.applySelectedReviewCandidate();
+      expect(controller.selectedBoxId, 'visual-next-unlabeled-box');
+      expect(controller.selectedReviewCandidateLabelId, 1);
+
+      controller.moveReviewCandidate(1);
+      controller.undo();
+      expect(controller.selectedBoxId, 'visual-next-unlabeled-box');
+      expect(controller.selectedReviewCandidateLabelId, 1);
+
+      controller.redo();
+      expect(controller.selectedBoxId, 'visual-next-unlabeled-box');
+      expect(controller.selectedReviewCandidateLabelId, 1);
+
+      controller.moveReviewCandidate(1);
+      controller.deleteSelectedBox();
+      expect(controller.selectedBoxId, isNull);
+      expect(controller.selectedReviewCandidateLabelId, isNull);
+
+      controller.undo();
+      expect(controller.selectedReviewCandidateLabelId, isNull);
+      controller.selectBox('visual-next-unlabeled-box');
+      expect(controller.selectedReviewCandidateLabelId, 1);
+    },
+  );
+
   test('editing an auto-labeled box makes it gray immediately', () {
     final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
       ..loadProject(_autoLabeledProject())
@@ -827,6 +1012,54 @@ AnnotationProject _project({String name = 'demo'}) {
             id: 'box-1',
             x: 0,
             y: 0,
+            width: 20,
+            height: 20,
+            status: BoxStatus.proposal,
+          ),
+        ],
+      ),
+    ],
+  );
+}
+
+AnnotationProject _reviewCandidateProject() {
+  return AnnotationProject.empty(name: 'review-candidates').copyWith(
+    labels: const [
+      LabelClass(id: 1, name: 'Bread', color: 0xFFAA5500),
+      LabelClass(id: 2, name: 'Pastry', color: 0xFF006699),
+    ],
+    images: const [
+      AnnotatedImage(
+        id: 1,
+        sourcePath: 'review.jpg',
+        displayName: 'review.jpg',
+        width: 100,
+        height: 80,
+        status: ImageStatus.needsReview,
+        boxes: [
+          BoundingBox(
+            id: 'review-box',
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 20,
+            status: BoxStatus.proposal,
+            automation: BoxAutomationMetadata(
+              suggestedLabelId: 1,
+              candidates: [
+                LabelCandidate(labelId: 1, score: 0.62),
+                LabelCandidate(labelId: 2, score: 0.38),
+              ],
+              reviewReasons: ['low_margin'],
+              pipelineVersion: 'test-v1',
+              policyVersion: 'test-policy-v1',
+              detectorSha256: 'detector-hash',
+            ),
+          ),
+          BoundingBox(
+            id: 'visual-next-unlabeled-box',
+            x: 40,
+            y: 10,
             width: 20,
             height: 20,
             status: BoxStatus.proposal,
