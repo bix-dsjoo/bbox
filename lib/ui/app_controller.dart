@@ -91,6 +91,7 @@ class AppController extends ChangeNotifier {
   String? _selectedBoxId;
   Object? lastError;
   Future<void> _autoSaveChain = Future<void>.value();
+  int _pendingAutoSaveCount = 0;
   List<ProjectLibraryEntry> _projectLibraryEntries = const [];
   bool _isProjectLibraryLoading = false;
   String? _currentLibraryProjectId;
@@ -110,6 +111,8 @@ class AppController extends ChangeNotifier {
   final Map<int, String> _pipelineVersionsByImageId = {};
   Map<int, SourceAvailability> _sourceAvailability = const {};
   int _sourceRefreshGeneration = 0;
+  final Map<int, int> _sourceRevisionsByImageId = {};
+  int _nextSourceRevision = 0;
   bool _isDisposed = false;
 
   final List<AnnotationProject> _undoStack = [];
@@ -269,6 +272,7 @@ class AppController extends ChangeNotifier {
       labels: createDefaultLabels(),
     );
     _resetSourceAvailability(_project);
+    _resetSourceRevisions(_project);
     _currentLibraryProjectId = _libraryProjectIdForPath(projectFilePath);
     _selectedImageId = null;
     _selectedBoxId = null;
@@ -289,6 +293,7 @@ class AppController extends ChangeNotifier {
     final migrated = !identical(migratedProject, project);
     _project = migratedProject;
     _resetSourceAvailability(_project);
+    _resetSourceRevisions(_project);
     _currentLibraryProjectId = _libraryProjectIdForPath(
       _project!.projectFilePath,
     );
@@ -337,6 +342,7 @@ class AppController extends ChangeNotifier {
     _projectEpoch++;
     _project = created;
     _resetSourceAvailability(_project);
+    _resetSourceRevisions(_project);
     _currentLibraryProjectId = _libraryProjectIdForPath(
       _project!.projectFilePath,
     );
@@ -366,7 +372,11 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> renameLibraryProject(String id, String name) async {
+    final requestEpoch = _projectEpoch;
+    if (_pendingAutoSaveCount > 0) await _waitForAutoSaveIdle();
+    if (_isDisposed || requestEpoch != _projectEpoch) return;
     final renamed = await _projectLibrary.renameProject(id, name);
+    if (_isDisposed || requestEpoch != _projectEpoch) return;
     if (_currentLibraryProjectId == id ||
         _project?.projectFilePath == renamed.projectFilePath) {
       _projectEpoch++;
@@ -380,12 +390,17 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> deleteLibraryProject(String id) async {
+    final requestEpoch = _projectEpoch;
+    if (_pendingAutoSaveCount > 0) await _waitForAutoSaveIdle();
+    if (_isDisposed || requestEpoch != _projectEpoch) return;
     await _projectLibrary.deleteProject(id);
+    if (_isDisposed || requestEpoch != _projectEpoch) return;
     _projectLibraryEntries = await _projectLibrary.listProjects();
     if (_currentLibraryProjectId == id) {
       _projectEpoch++;
       _project = null;
       _resetSourceAvailability(null);
+      _resetSourceRevisions(null);
       _currentLibraryProjectId = null;
       _selectedImageId = null;
       _selectedBoxId = null;
@@ -425,6 +440,7 @@ class AppController extends ChangeNotifier {
     _projectEpoch++;
     _project = project;
     _resetSourceAvailability(_project);
+    _resetSourceRevisions(_project);
     _repairSelection();
     notifyListeners();
   }
@@ -708,6 +724,9 @@ class AppController extends ChangeNotifier {
           _classificationDebounce?.cancel();
           _classificationGeneration++;
           _classificationPending = false;
+          for (final imageId in appliedPaths.keys) {
+            _advanceSourceRevision(imageId);
+          }
           _scheduleAutoSave();
         }
       }
@@ -799,6 +818,7 @@ class AppController extends ChangeNotifier {
     );
     _sourceAvailability = Map<int, SourceAvailability>.from(_sourceAvailability)
       ..remove(imageId);
+    _sourceRevisionsByImageId.remove(imageId);
     _repairSelectionAfterRemoval();
     _imageViewLoadState = ImageViewLoadState(
       imageId: _selectedImageId,
@@ -982,6 +1002,7 @@ class AppController extends ChangeNotifier {
     final requestProjectEpoch = _projectEpoch;
     final requestImageId = image.id;
     final requestSourcePath = image.sourcePath;
+    final requestSourceRevision = _sourceRevisionFor(image.id);
     final previousProject = project;
     final previousImage = image;
     final previousSelectedBoxId = _selectedBoxId;
@@ -1001,6 +1022,7 @@ class AppController extends ChangeNotifier {
         requestProjectEpoch,
         requestImageId,
         requestSourcePath,
+        requestSourceRevision,
       )) {
         _clearStaleAutoBoxActivity(requestToken);
         return;
@@ -1047,6 +1069,7 @@ class AppController extends ChangeNotifier {
         requestProjectEpoch,
         requestImageId,
         requestSourcePath,
+        requestSourceRevision,
       )) {
         _clearStaleAutoBoxActivity(requestToken);
         return;
@@ -1435,6 +1458,7 @@ class AppController extends ChangeNotifier {
     _project = _undoStack.removeLast();
     _repairSelection();
     _resetSourceAvailability(_project);
+    _resetSourceRevisions(_project);
     _refreshSourceAvailabilityInBackground();
     notifyListeners();
   }
@@ -1450,6 +1474,7 @@ class AppController extends ChangeNotifier {
     _project = _redoStack.removeLast();
     _repairSelection();
     _resetSourceAvailability(_project);
+    _resetSourceRevisions(_project);
     _refreshSourceAvailabilityInBackground();
     notifyListeners();
   }
@@ -1458,6 +1483,7 @@ class AppController extends ChangeNotifier {
     _projectEpoch++;
     _project = null;
     _resetSourceAvailability(null);
+    _resetSourceRevisions(null);
     _currentLibraryProjectId = null;
     _selectedImageId = null;
     _selectedBoxId = null;
@@ -1578,6 +1604,9 @@ class AppController extends ChangeNotifier {
         for (final imageId in addedImageIds)
           imageId: SourceAvailability.available,
       };
+      for (final imageId in addedImageIds) {
+        _advanceSourceRevision(imageId);
+      }
       _repairSelectionAfterImport(nextImages);
       _scheduleAutoSave();
     } finally {
@@ -1758,12 +1787,14 @@ class AppController extends ChangeNotifier {
     int requestProjectEpoch,
     int requestImageId,
     String requestSourcePath,
+    int requestSourceRevision,
   ) {
     return !_isDisposed &&
         _project != null &&
         _projectEpoch == requestProjectEpoch &&
         _selectedImageId == requestImageId &&
-        _imageById(requestImageId)?.sourcePath == requestSourcePath;
+        _imageById(requestImageId)?.sourcePath == requestSourcePath &&
+        _sourceRevisionFor(requestImageId) == requestSourceRevision;
   }
 
   void _clearStaleAutoBoxActivity(int requestToken) {
@@ -1853,6 +1884,7 @@ class AppController extends ChangeNotifier {
     final libraryProjectId = _currentLibraryProjectId;
     _saveStatus = SaveStatus.saving;
     _lastSaveError = null;
+    _pendingAutoSaveCount++;
     notifyListeners();
     _autoSaveChain = _autoSaveChain.then((_) async {
       try {
@@ -1884,6 +1916,8 @@ class AppController extends ChangeNotifier {
         _lastSaveError = error;
         _saveStatus = SaveStatus.failed;
         notifyListeners();
+      } finally {
+        _pendingAutoSaveCount--;
       }
     });
     unawaited(_autoSaveChain);
@@ -1915,6 +1949,20 @@ class AppController extends ChangeNotifier {
       for (final image in project?.images ?? const <AnnotatedImage>[])
         image.id: SourceAvailability.unknown,
     };
+  }
+
+  int _sourceRevisionFor(int imageId) =>
+      _sourceRevisionsByImageId[imageId] ?? -1;
+
+  void _advanceSourceRevision(int imageId) {
+    _sourceRevisionsByImageId[imageId] = ++_nextSourceRevision;
+  }
+
+  void _resetSourceRevisions(AnnotationProject? project) {
+    _sourceRevisionsByImageId.clear();
+    for (final image in project?.images ?? const <AnnotatedImage>[]) {
+      _advanceSourceRevision(image.id);
+    }
   }
 
   Future<void> _refreshLibraryEntryForAutoSave(

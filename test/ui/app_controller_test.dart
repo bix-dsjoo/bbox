@@ -633,6 +633,57 @@ void main() {
     });
 
     test(
+      'same-path relink invalidates in-flight detection for replaced bytes',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp(
+          'bbox_controller_same_path_relink_detection',
+        );
+        addTearDown(() => tempDir.delete(recursive: true));
+        final sourcePath = p.join(tempDir.path, 'source', 'bread.png');
+        final detectionStarted = Completer<void>();
+        final detection = Completer<DetectionResult>();
+        final controller = AppController()
+          ..loadProject(_portableProject(sourcePaths: [sourcePath]));
+        await controller.refreshSourceAvailability();
+
+        final pendingDetection = controller.detectSelectedImage(
+          replaceExisting: true,
+          detector: _RecordingDetector(
+            onDetect: (_, {imagePath, options = const DetectionOptions()}) {
+              detectionStarted.complete();
+              return detection.future;
+            },
+          ),
+        );
+        await detectionStarted.future;
+        await _writePng(sourcePath, width: 32, height: 24);
+        final relink = await controller.relinkSourceFiles([sourcePath]);
+        detection.complete(
+          const DetectionResult(
+            detectorName: 'stale-same-path-detector',
+            boxes: [
+              BoundingBox(
+                id: 'stale-same-path-box',
+                x: 2,
+                y: 3,
+                width: 4,
+                height: 5,
+                status: BoxStatus.proposal,
+              ),
+            ],
+          ),
+        );
+        await pendingDetection;
+
+        expect(relink.matchedCount, 1);
+        expect(controller.project!.images.single.sourcePath, sourcePath);
+        expect(controller.project!.images.single.boxes.single.id, 'box-1');
+        expect(controller.isAutomationRunning, isFalse);
+        expect(controller.lastUserMessage, contains('Reconnected 1'));
+      },
+    );
+
+    test(
       'relink invalidates in-flight classification for the old source',
       () async {
         final tempDir = await Directory.systemTemp.createTemp(

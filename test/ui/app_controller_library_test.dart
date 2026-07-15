@@ -105,6 +105,89 @@ void main() {
       expect(controller.hasProject, isFalse);
     });
 
+    test('rename waits for an in-flight autosave before mutation', () async {
+      final mutationLibrary = _MutationGatedProjectLibrary(
+        rootPath: p.join(tempDir.path, 'rename-race-library'),
+      );
+      final saveStarted = Completer<void>();
+      final saveRelease = Completer<void>();
+      final raceController = AppController(
+        projectLibrary: mutationLibrary,
+        projectSaver: (project, path) async {
+          saveStarted.complete();
+          await saveRelease.future;
+          return ProjectStore.save(project, path);
+        },
+      );
+      await raceController.createLibraryProject('Before');
+      final projectPath = raceController.project!.projectFilePath!;
+      raceController.addLabel('Pending Save', 0xff112233);
+      await saveStarted.future;
+
+      late Future<void> rename;
+      addTearDown(() async {
+        if (!saveRelease.isCompleted) saveRelease.complete();
+        if (!mutationLibrary.renameRelease.isCompleted) {
+          mutationLibrary.renameRelease.complete();
+        }
+        await rename;
+      });
+      rename = raceController.renameLibraryProject(
+        'controller-project',
+        'After',
+      );
+
+      expect(mutationLibrary.renameEntered.isCompleted, isFalse);
+      saveRelease.complete();
+      await mutationLibrary.renameEntered.future;
+      mutationLibrary.renameRelease.complete();
+      await rename;
+
+      expect((await ProjectStore.load(projectPath)).name, 'After');
+      expect((await mutationLibrary.listProjects()).single.name, 'After');
+      expect(raceController.project!.name, 'After');
+    });
+
+    test('delete waits for an in-flight autosave before mutation', () async {
+      final mutationLibrary = _MutationGatedProjectLibrary(
+        rootPath: p.join(tempDir.path, 'delete-race-library'),
+      );
+      final saveStarted = Completer<void>();
+      final saveRelease = Completer<void>();
+      final raceController = AppController(
+        projectLibrary: mutationLibrary,
+        projectSaver: (project, path) async {
+          saveStarted.complete();
+          await saveRelease.future;
+          return ProjectStore.save(project, path);
+        },
+      );
+      await raceController.createLibraryProject('Delete Me');
+      final projectPath = raceController.project!.projectFilePath!;
+      raceController.addLabel('Pending Save', 0xff112233);
+      await saveStarted.future;
+
+      late Future<void> delete;
+      addTearDown(() async {
+        if (!saveRelease.isCompleted) saveRelease.complete();
+        if (!mutationLibrary.deleteRelease.isCompleted) {
+          mutationLibrary.deleteRelease.complete();
+        }
+        await delete;
+      });
+      delete = raceController.deleteLibraryProject('controller-project');
+
+      expect(mutationLibrary.deleteEntered.isCompleted, isFalse);
+      saveRelease.complete();
+      await mutationLibrary.deleteEntered.future;
+      mutationLibrary.deleteRelease.complete();
+      await delete;
+
+      expect(await File(projectPath).exists(), isFalse);
+      expect(await mutationLibrary.listProjects(), isEmpty);
+      expect(raceController.hasProject, isFalse);
+    });
+
     test('validates missing image source files before continuing', () async {
       await controller.createLibraryProject('Validate Sources');
       controller.loadProject(
@@ -502,6 +585,35 @@ class _FailingAvailabilityService extends SourceRelinkService {
     throw FileSystemException('Injected availability failure');
   }
 }
+
+class _MutationGatedProjectLibrary extends ProjectLibrary {
+  _MutationGatedProjectLibrary({required super.rootPath})
+    : super(clock: _fixedLibraryClock, idGenerator: _fixedLibraryIdGenerator);
+
+  final renameEntered = Completer<void>();
+  final renameRelease = Completer<void>();
+  final deleteEntered = Completer<void>();
+  final deleteRelease = Completer<void>();
+
+  @override
+  Future<AnnotationProject> renameProject(String id, String name) async {
+    renameEntered.complete();
+    await renameRelease.future;
+    return super.renameProject(id, name);
+  }
+
+  @override
+  Future<void> deleteProject(String id) async {
+    deleteEntered.complete();
+    await deleteRelease.future;
+    return super.deleteProject(id);
+  }
+}
+
+DateTime _fixedLibraryClock() => DateTime.utc(2026, 7, 7, 5, 30);
+
+String _fixedLibraryIdGenerator(String name, DateTime timestamp) =>
+    'controller-project';
 
 Future<void> _deleteTempDir(Directory directory) async {
   for (var attempt = 0; attempt < 5; attempt += 1) {
