@@ -59,6 +59,16 @@ void main() {
 
       final senderProject = sender.project!;
       final senderCoco = sender.buildCoco();
+      expect(_cocoImageIds(senderCoco), [101, 207]);
+      expect(_cocoCategoryIds(senderCoco), [5, 11]);
+      final senderAnnotationTuples = _normalizedAnnotationTuples(senderCoco);
+      expect(senderAnnotationTuples, [
+        {
+          'image_id': 101,
+          'category_id': 11,
+          'bbox': [4.0, 5.0, 20.0, 18.0],
+        },
+      ]);
       final manualImage = senderProject.images.singleWhere(
         (image) => image.id == 207,
       );
@@ -99,10 +109,10 @@ void main() {
       await receiver.importProjectSnapshot(snapshotPath);
 
       expect(receiver.missingSourceCount, 0);
-      expect(
-        receiver.sourceAvailability.values,
-        everyElement(SourceAvailability.available),
-      );
+      expect(receiver.sourceAvailability, {
+        101: SourceAvailability.available,
+        207: SourceAvailability.available,
+      });
       _expectTransferredAnnotations(receiver.project!, senderProject);
 
       final statusesBeforeMove = {
@@ -175,6 +185,10 @@ void main() {
       await reopened.openLibraryProject('receiver-project');
 
       expect(reopened.missingSourceCount, 0);
+      expect(reopened.sourceAvailability, {
+        101: SourceAvailability.available,
+        207: SourceAvailability.available,
+      });
       expect({
         for (final image in reopened.project!.images) image.id: image.status,
       }, statusesBeforeMove);
@@ -191,6 +205,7 @@ void main() {
       expect(_cocoImageIds(receiverCoco), _cocoImageIds(senderCoco));
       expect(_cocoCategoryIds(receiverCoco), _cocoCategoryIds(senderCoco));
       expect(_cocoBboxes(receiverCoco), _cocoBboxes(senderCoco));
+      expect(_normalizedAnnotationTuples(receiverCoco), senderAnnotationTuples);
 
       reopened.selectImage(207);
       final visualOrder = BoxDisplayOrder.sorted(reopened.selectedImage!);
@@ -208,6 +223,21 @@ void main() {
             .labelId,
         11,
       );
+      final manuallyLabeledCoco = reopened.buildCoco();
+      expect(_cocoImageIds(manuallyLabeledCoco), [101, 207]);
+      expect(_cocoCategoryIds(manuallyLabeledCoco), [5, 11]);
+      expect(_normalizedAnnotationTuples(manuallyLabeledCoco), [
+        {
+          'image_id': 101,
+          'category_id': 11,
+          'bbox': [4.0, 5.0, 20.0, 18.0],
+        },
+        {
+          'image_id': 207,
+          'category_id': 11,
+          'bbox': [6.0, 8.0, 18.0, 14.0],
+        },
+      ]);
       await reopened.saveProject();
     },
   );
@@ -226,17 +256,17 @@ AnnotationProject _senderProject({
     detectorName: 'integration-fixture',
     labels: const [
       LabelClass(
-        id: 5,
-        name: 'Pastry',
-        color: 0xff7e57c2,
-        shortcut: '1',
-        supercategory: 'baked-good',
-      ),
-      LabelClass(
         id: 11,
         name: 'Bread',
         color: 0xffff9800,
         shortcut: '2',
+        supercategory: 'baked-good',
+      ),
+      LabelClass(
+        id: 5,
+        name: 'Pastry',
+        color: 0xff7e57c2,
+        shortcut: '1',
         supercategory: 'baked-good',
       ),
     ],
@@ -346,6 +376,35 @@ List<Object?> _cocoBboxes(Map<String, Object?> coco) {
       .cast<Map<String, Object?>>()
       .map((annotation) => annotation['bbox'])
       .toList();
+}
+
+List<Map<String, Object?>> _normalizedAnnotationTuples(
+  Map<String, Object?> coco,
+) {
+  final tuples = (coco['annotations']! as List<Object?>)
+      .cast<Map<String, Object?>>()
+      .map(
+        (annotation) => <String, Object?>{
+          'image_id': annotation['image_id'],
+          'category_id': annotation['category_id'],
+          'bbox': List<Object?>.from(annotation['bbox']! as List<Object?>),
+        },
+      )
+      .toList();
+  tuples.sort((left, right) {
+    final imageComparison = (left['image_id']! as int).compareTo(
+      right['image_id']! as int,
+    );
+    if (imageComparison != 0) return imageComparison;
+    final categoryComparison = (left['category_id']! as int).compareTo(
+      right['category_id']! as int,
+    );
+    if (categoryComparison != 0) return categoryComparison;
+    return (left['bbox']! as List<Object?>)
+        .join(',')
+        .compareTo((right['bbox']! as List<Object?>).join(','));
+  });
+  return tuples;
 }
 
 Future<File> _writePng(
