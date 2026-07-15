@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:crypto/crypto.dart';
 import 'package:image/image.dart' as img;
@@ -9,37 +10,64 @@ import '../image_import/image_scanner.dart';
 
 enum SourceAvailability { unknown, available, missing }
 
+class SourceCandidateMetadata {
+  const SourceCandidateMetadata({
+    required this.width,
+    required this.height,
+    this.sha256,
+  });
+
+  final int width;
+  final int height;
+  final String? sha256;
+}
+
+typedef SourceCandidateMetadataLoader =
+    Future<SourceCandidateMetadata?> Function(
+      String path, {
+      required bool includeHash,
+    });
+
 class SourceRelinkResult {
   const SourceRelinkResult({
     required this.matchedPaths,
     required this.matchedImportedFrom,
     required this.unresolvedImageIds,
     required this.ambiguousImageIds,
+    this.unreadableCandidatePaths = const {},
   });
 
   final Map<int, String> matchedPaths;
   final Map<int, String> matchedImportedFrom;
   final Set<int> unresolvedImageIds;
   final Set<int> ambiguousImageIds;
+  final Set<String> unreadableCandidatePaths;
 
   int get matchedCount => matchedPaths.length;
 }
 
 class SourceRelinkService {
-  const SourceRelinkService();
+  const SourceRelinkService({
+    this.maxConcurrentCandidateLoads = 4,
+    this.metadataLoader,
+  }) : assert(maxConcurrentCandidateLoads > 0);
+
+  final int maxConcurrentCandidateLoads;
+  final SourceCandidateMetadataLoader? metadataLoader;
 
   Future<Map<int, SourceAvailability>> inspectSources(
     Iterable<AnnotatedImage> images,
   ) async {
-    final entries = await Future.wait([
-      for (final image in images)
-        File(image.sourcePath).exists().then(
-          (exists) => MapEntry(
-            image.id,
-            exists ? SourceAvailability.available : SourceAvailability.missing,
-          ),
-        ),
-    ]);
+    final entries = await _mapBounded(
+      images.toList(growable: false),
+      maxConcurrentCandidateLoads,
+      (image) async => MapEntry(
+        image.id,
+        await File(image.sourcePath).exists()
+            ? SourceAvailability.available
+            : SourceAvailability.missing,
+      ),
+    );
     return Map.fromEntries(entries);
   }
 
@@ -96,17 +124,20 @@ class SourceRelinkService {
     required String Function(String path) importedFromForMatch,
   }) async {
     final includeHash = images.any((image) => image.contentSha256 != null);
-    final uniquePaths = <String, String>{
-      for (final path in paths)
-        p.normalize(path).toLowerCase(): p.normalize(path),
-    }.values.toList(growable: false);
-    final inspected = await Future.wait([
-      for (final path in uniquePaths) _inspectCandidate(path, includeHash),
-    ]);
-    final candidates = inspected.whereType<_CandidateMetadata>().toList();
+    final uniquePaths = {
+      for (final path in paths) _pathKey(path),
+    }.toList(growable: false);
+    final inspected = await _mapBounded(
+      uniquePaths,
+      maxConcurrentCandidateLoads,
+      (path) => _inspectCandidate(path, includeHash),
+    );
+    final candidates = [
+      for (final inspection in inspected)
+        if (inspection.metadata != null) inspection.metadata!,
+    ];
     final byPath = {
-      for (final candidate in candidates)
-        p.normalize(candidate.path).toLowerCase(): candidate,
+      for (final candidate in candidates) _pathKey(candidate.path): candidate,
     };
 
     final proposals = <int, List<_CandidateMetadata>>{};
@@ -114,7 +145,7 @@ class SourceRelinkService {
       final preferred = preferredPaths[image.id];
       final preferredCandidate = preferred == null
           ? null
-          : byPath[p.normalize(preferred).toLowerCase()];
+          : byPath[_pathKey(preferred)];
       if (preferredCandidate != null && _matches(image, preferredCandidate)) {
         proposals[image.id] = [preferredCandidate];
         continue;
@@ -126,6 +157,18 @@ class SourceRelinkService {
     }
 
     final ambiguous = <int>{};
+    final ownersByPath = <String, Set<int>>{};
+    for (final entry in proposals.entries) {
+      for (final candidate in entry.value) {
+        ownersByPath
+            .putIfAbsent(_pathKey(candidate.path), () => <int>{})
+            .add(entry.key);
+      }
+    }
+    for (final owners in ownersByPath.values) {
+      if (owners.length > 1) ambiguous.addAll(owners);
+    }
+
     final single = <int, _CandidateMetadata>{};
     for (final entry in proposals.entries) {
       if (entry.value.length > 1) {
@@ -135,18 +178,8 @@ class SourceRelinkService {
       }
     }
 
-    final ownersByPath = <String, List<int>>{};
-    for (final entry in single.entries) {
-      final key = p.normalize(entry.value.path).toLowerCase();
-      ownersByPath.putIfAbsent(key, () => []).add(entry.key);
-    }
-    for (final owners in ownersByPath.values) {
-      if (owners.length > 1) {
-        ambiguous.addAll(owners);
-        for (final imageId in owners) {
-          single.remove(imageId);
-        }
-      }
+    for (final imageId in ambiguous) {
+      single.remove(imageId);
     }
 
     final matchedPaths = <int, String>{};
@@ -167,6 +200,10 @@ class SourceRelinkService {
       matchedImportedFrom: matchedImportedFrom,
       unresolvedImageIds: unresolved,
       ambiguousImageIds: ambiguous,
+      unreadableCandidatePaths: {
+        for (final inspection in inspected)
+          if (inspection.metadata == null) inspection.path,
+      },
     );
   }
 
@@ -178,25 +215,87 @@ class SourceRelinkService {
         candidate.height == image.height;
   }
 
-  Future<_CandidateMetadata?> _inspectCandidate(
+  Future<_CandidateInspection> _inspectCandidate(
     String path,
     bool includeHash,
   ) async {
     try {
-      final bytes = await File(path).readAsBytes();
-      final decoded = img.decodeImage(bytes);
-      if (decoded == null) return null;
-      return _CandidateMetadata(
-        path: p.normalize(path),
-        fileNameKey: p.basename(path).toLowerCase(),
-        width: decoded.width,
-        height: decoded.height,
-        sha256: includeHash ? sha256.convert(bytes).toString() : null,
+      final loaded = await (metadataLoader ?? _loadCandidateMetadata)(
+        path,
+        includeHash: includeHash,
       );
-    } on FileSystemException {
-      return null;
+      if (loaded == null) return _CandidateInspection.unreadable(path);
+      return _CandidateInspection.readable(
+        _CandidateMetadata(
+          path: path,
+          fileNameKey: p.basename(path).toLowerCase(),
+          width: loaded.width,
+          height: loaded.height,
+          sha256: loaded.sha256,
+        ),
+      );
+    } catch (_) {
+      return _CandidateInspection.unreadable(path);
     }
   }
+}
+
+Future<SourceCandidateMetadata?> _loadCandidateMetadata(
+  String path, {
+  required bool includeHash,
+}) async {
+  final file = File(path);
+  final bytes = await file.readAsBytes();
+  final dimensions = await Isolate.run<({int width, int height})?>(() {
+    final decoded = img.decodeImage(bytes);
+    if (decoded == null) return null;
+    return (width: decoded.width, height: decoded.height);
+  });
+  if (dimensions == null) return null;
+  final digest = includeHash ? await sha256.bind(file.openRead()).first : null;
+  return SourceCandidateMetadata(
+    width: dimensions.width,
+    height: dimensions.height,
+    sha256: digest?.toString(),
+  );
+}
+
+String _pathKey(String path) => p.normalize(p.absolute(path));
+
+Future<List<R>> _mapBounded<T, R>(
+  List<T> values,
+  int maxConcurrent,
+  Future<R> Function(T value) transform,
+) async {
+  if (values.isEmpty) return <R>[];
+  final results = List<R?>.filled(values.length, null);
+  var nextIndex = 0;
+
+  Future<void> worker() async {
+    while (nextIndex < values.length) {
+      final index = nextIndex++;
+      results[index] = await transform(values[index]);
+    }
+  }
+
+  final workerCount = maxConcurrent < values.length
+      ? maxConcurrent
+      : values.length;
+  await Future.wait([
+    for (var index = 0; index < workerCount; index++) worker(),
+  ]);
+  return [for (final result in results) result as R];
+}
+
+class _CandidateInspection {
+  _CandidateInspection.readable(_CandidateMetadata metadata)
+    : path = metadata.path,
+      metadata = metadata;
+
+  const _CandidateInspection.unreadable(this.path) : metadata = null;
+
+  final String path;
+  final _CandidateMetadata? metadata;
 }
 
 class _CandidateMetadata {

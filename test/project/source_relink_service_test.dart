@@ -61,7 +61,8 @@ void main() {
       width: 32,
       height: 24,
     );
-    final image = _image(sourcePath: r'C:\old\bread.png');
+    final missingPath = p.join(tempDir.path, 'old', 'bread.png');
+    final image = _image(sourcePath: missingPath);
 
     final result = await service.relinkFiles(
       missingImages: [image],
@@ -73,7 +74,7 @@ void main() {
     expect(result.matchedCount, 1);
     expect(result.unresolvedImageIds, isEmpty);
     expect(result.ambiguousImageIds, isEmpty);
-    expect(image.sourcePath, r'C:\old\bread.png');
+    expect(image.sourcePath, missingPath);
     expect(image.status, ImageStatus.confirmed);
     expect(image.boxes.single.labelId, 7);
   });
@@ -92,9 +93,10 @@ void main() {
       width: 32,
       height: 24,
     );
+    final originalRoot = p.join(tempDir.path, 'old source');
     final image = _image(
-      sourcePath: p.join(r'C:\old source', '중첩 batch', 'bread.png'),
-      importedFrom: r'C:\old source',
+      sourcePath: p.join(originalRoot, '중첩 batch', 'bread.png'),
+      importedFrom: originalRoot,
     );
 
     final result = await service.relinkFolder(
@@ -120,7 +122,9 @@ void main() {
     );
 
     final result = await service.relinkFiles(
-      missingImages: [_image(sourcePath: r'C:\old\bread.png')],
+      missingImages: [
+        _image(sourcePath: p.join(tempDir.path, 'old', 'bread.png')),
+      ],
       candidatePaths: [candidateA.path, candidateB.path],
     );
 
@@ -148,7 +152,10 @@ void main() {
 
     final result = await service.relinkFiles(
       missingImages: [
-        _image(sourcePath: r'C:\old\bread.png', contentSha256: expectedHash),
+        _image(
+          sourcePath: p.join(tempDir.path, 'old', 'bread.png'),
+          contentSha256: expectedHash,
+        ),
       ],
       candidatePaths: [different.path, matching.path],
     );
@@ -167,7 +174,9 @@ void main() {
       );
 
       final result = await service.relinkFiles(
-        missingImages: [_image(id: 9, sourcePath: r'C:\old\bread.png')],
+        missingImages: [
+          _image(id: 9, sourcePath: p.join(tempDir.path, 'old', 'bread.png')),
+        ],
         candidatePaths: [selectedCandidate.path],
       );
 
@@ -179,7 +188,9 @@ void main() {
 
   test('reports unresolved images and rejects a missing folder', () async {
     final unresolved = await service.relinkFiles(
-      missingImages: [_image(sourcePath: r'C:\old\bread.png')],
+      missingImages: [
+        _image(sourcePath: p.join(tempDir.path, 'old', 'bread.png')),
+      ],
       candidatePaths: [p.join(tempDir.path, 'not-there.png')],
     );
 
@@ -188,7 +199,9 @@ void main() {
     expect(unresolved.ambiguousImageIds, isEmpty);
     await expectLater(
       service.relinkFolder(
-        missingImages: [_image(sourcePath: r'C:\old\bread.png')],
+        missingImages: [
+          _image(sourcePath: p.join(tempDir.path, 'old', 'bread.png')),
+        ],
         folderPath: p.join(tempDir.path, 'missing folder'),
       ),
       throwsA(isA<FileSystemException>()),
@@ -204,8 +217,8 @@ void main() {
 
     final result = await service.relinkFiles(
       missingImages: [
-        _image(id: 1, sourcePath: r'C:\old-a\bread.png'),
-        _image(id: 2, sourcePath: r'C:\old-b\bread.png'),
+        _image(id: 1, sourcePath: p.join(tempDir.path, 'old-a', 'bread.png')),
+        _image(id: 2, sourcePath: p.join(tempDir.path, 'old-b', 'bread.png')),
       ],
       candidatePaths: [candidate.path],
     );
@@ -214,11 +227,136 @@ void main() {
     expect(result.unresolvedImageIds, isEmpty);
     expect(result.ambiguousImageIds, {1, 2});
   });
+
+  test(
+    'shared preferred candidate makes every proposing image ambiguous',
+    () async {
+      final replacementRoot = await Directory(
+        p.join(tempDir.path, 'replacement'),
+      ).create();
+      await _writePng(
+        p.join(replacementRoot.path, 'batch', 'bread.png'),
+        width: 32,
+        height: 24,
+      );
+      await _writePng(
+        p.join(replacementRoot.path, 'other', 'bread.png'),
+        width: 32,
+        height: 24,
+      );
+      final originalRoot = p.join(tempDir.path, 'original');
+
+      final result = await service.relinkFolder(
+        missingImages: [
+          _image(
+            id: 1,
+            sourcePath: p.join(originalRoot, 'batch', 'bread.png'),
+            importedFrom: originalRoot,
+          ),
+          _image(
+            id: 2,
+            sourcePath: p.join(tempDir.path, 'other-old', 'bread.png'),
+          ),
+        ],
+        folderPath: replacementRoot.path,
+      );
+
+      expect(result.matchedPaths, isEmpty);
+      expect(result.unresolvedImageIds, isEmpty);
+      expect(result.ambiguousImageIds, {1, 2});
+    },
+  );
+
+  test('case-distinct paths remain distinct candidate identities', () async {
+    final loadedPaths = <String>[];
+    final caseUpper = p.join(tempDir.path, 'case', 'Bread.png');
+    final caseLower = p.join(tempDir.path, 'case', 'bread.png');
+    final seamService = SourceRelinkService(
+      metadataLoader: (path, {required includeHash}) async {
+        loadedPaths.add(path);
+        return const SourceCandidateMetadata(width: 32, height: 24);
+      },
+    );
+
+    final result = await seamService.relinkFiles(
+      missingImages: [
+        _image(
+          sourcePath: p.join(tempDir.path, 'old', 'bread.png'),
+          displayName: 'bread.png',
+        ),
+      ],
+      candidatePaths: [caseUpper, caseLower],
+    );
+
+    expect(loadedPaths.toSet(), {p.absolute(caseUpper), p.absolute(caseLower)});
+    expect(result.matchedPaths, isEmpty);
+    expect(result.ambiguousImageIds, {1});
+  });
+
+  test('corrupt candidate is diagnosed without hiding a valid match', () async {
+    final corrupt = File(p.join(tempDir.path, 'corrupt', 'bread.png'));
+    await corrupt.parent.create(recursive: true);
+    await corrupt.writeAsString('not an image');
+    final valid = await _writePng(
+      p.join(tempDir.path, 'valid', 'bread.png'),
+      width: 32,
+      height: 24,
+    );
+
+    final result = await service.relinkFiles(
+      missingImages: [
+        _image(sourcePath: p.join(tempDir.path, 'old', 'bread.png')),
+      ],
+      candidatePaths: [corrupt.path, valid.path],
+    );
+
+    expect(result.matchedPaths, {1: p.absolute(valid.path)});
+    expect(result.unreadableCandidatePaths, {p.absolute(corrupt.path)});
+    expect(result.ambiguousImageIds, isEmpty);
+  });
+
+  test(
+    'candidate metadata loading honors the configured concurrency bound',
+    () async {
+      var activeLoads = 0;
+      var peakLoads = 0;
+      final candidatePaths = [
+        for (var index = 0; index < 6; index++)
+          p.join(tempDir.path, 'candidate-$index.png'),
+      ];
+      final seamService = SourceRelinkService(
+        maxConcurrentCandidateLoads: 2,
+        metadataLoader: (path, {required includeHash}) async {
+          expect(includeHash, isFalse);
+          activeLoads++;
+          if (activeLoads > peakLoads) peakLoads = activeLoads;
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          activeLoads--;
+          return const SourceCandidateMetadata(width: 32, height: 24);
+        },
+      );
+
+      final result = await seamService.relinkFiles(
+        missingImages: [
+          for (var index = 0; index < candidatePaths.length; index++)
+            _image(
+              id: index + 1,
+              sourcePath: p.join(tempDir.path, 'old', 'candidate-$index.png'),
+            ),
+        ],
+        candidatePaths: candidatePaths,
+      );
+
+      expect(peakLoads, 2);
+      expect(result.matchedCount, candidatePaths.length);
+    },
+  );
 }
 
 AnnotatedImage _image({
   int id = 1,
   required String sourcePath,
+  String? displayName,
   String? importedFrom,
   int width = 32,
   int height = 24,
@@ -228,7 +366,7 @@ AnnotatedImage _image({
   return AnnotatedImage(
     id: id,
     sourcePath: sourcePath,
-    displayName: p.basename(sourcePath),
+    displayName: displayName ?? p.basename(sourcePath),
     importedFrom: importedFrom,
     width: width,
     height: height,
