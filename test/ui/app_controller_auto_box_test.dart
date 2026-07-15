@@ -37,6 +37,77 @@ void main() {
     expect(runtime.warmUpCount, 1);
   });
 
+  test('existing boxes are not replaced without explicit permission', () async {
+    final runtime = FakeAutoBoxRuntime(
+      detectionResult: _oneBoxResult('replacement-box'),
+    );
+    final controller = AppController(autoBoxRuntime: runtime)
+      ..loadProject(_project());
+    addTearDown(controller.dispose);
+
+    await controller.detectSelectedImage();
+
+    expect(runtime.detectCount, 0);
+    expect(controller.selectedImage!.visibleBoxes.single.id, 'box-1');
+    expect(
+      controller.lastUserMessage,
+      WorkbenchCopy.autoBoxesReplacementConfirmationRequired,
+    );
+  });
+
+  test('explicit replacement is one undo operation', () async {
+    final runtime = FakeAutoBoxRuntime(
+      detectionResult: _oneBoxResult('replacement-box'),
+    );
+    final controller = AppController(autoBoxRuntime: runtime)
+      ..loadProject(_project());
+    addTearDown(controller.dispose);
+
+    await controller.detectSelectedImage(replaceExisting: true);
+
+    expect(controller.selectedImage!.visibleBoxes.single.id, 'replacement-box');
+    controller.undo();
+    expect(controller.selectedImage!.visibleBoxes.single.id, 'box-1');
+    expect(controller.canUndo, isFalse);
+  });
+
+  test('accepting selected review suggestion records a user label', () {
+    final reviewBox = const BoundingBox(
+      id: 'review-box',
+      x: 10,
+      y: 10,
+      width: 20,
+      height: 20,
+      status: BoxStatus.proposal,
+      automation: BoxAutomationMetadata(
+        suggestedLabelId: 1,
+        reviewReasons: ['low_margin'],
+        pipelineVersion: 'test-v1',
+        policyVersion: 'test-policy-v1',
+        detectorSha256: 'detector-hash',
+      ),
+    );
+    final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+      ..loadProject(
+        _project().copyWith(
+          images: [
+            _project().images.first.copyWith(boxes: [reviewBox]),
+          ],
+        ),
+      )
+      ..selectBox('review-box');
+    addTearDown(controller.dispose);
+
+    controller.acceptSelectedSuggestedLabel();
+
+    final accepted = controller.selectedBox!;
+    expect(accepted.status, BoxStatus.labeled);
+    expect(accepted.labelId, 1);
+    expect(accepted.labelSource, LabelSource.user);
+    expect(accepted.requiresLabelReview, isFalse);
+    expect(controller.canUndo, isTrue);
+  });
+
   test('failed service remains manually retryable', () async {
     final runtime = FakeAutoBoxRuntime(
       state: AutoBoxState.failed,
@@ -60,7 +131,7 @@ void main() {
 
     expect(controller.canRunAutoBoxes, isTrue);
 
-    await controller.detectSelectedImage();
+    await controller.detectSelectedImage(replaceExisting: true);
 
     expect(runtime.warmUpCount, 1);
     expect(runtime.detectCount, 1);
@@ -76,13 +147,13 @@ void main() {
         ..loadProject(_project());
       addTearDown(controller.dispose);
 
-      final first = controller.detectSelectedImage();
+      final first = controller.detectSelectedImage(replaceExisting: true);
       await Future<void>.delayed(Duration.zero);
 
       expect(controller.isAutoBoxRunning, isTrue);
       expect(controller.isAutomationRunning, isTrue);
 
-      final second = controller.detectSelectedImage();
+      final second = controller.detectSelectedImage(replaceExisting: true);
       await Future<void>.delayed(Duration.zero);
       expect(runtime.detectCount, 1);
 
@@ -105,12 +176,37 @@ void main() {
       ..loadProject(_project());
     addTearDown(controller.dispose);
 
-    await controller.detectSelectedImage();
+    await controller.detectSelectedImage(replaceExisting: true);
 
     expect(runtime.detectCount, 1);
     expect(controller.isAutoBoxRunning, isFalse);
     expect(controller.isAutomationRunning, isFalse);
   });
+
+  test(
+    'cancelling detection restores project selection and busy state',
+    () async {
+      final completer = Completer<DetectionResult>();
+      final runtime = FakeAutoBoxRuntime(detectionCompleter: completer);
+      final controller = AppController(autoBoxRuntime: runtime)
+        ..loadProject(_project())
+        ..selectBox('box-1');
+      addTearDown(controller.dispose);
+      final projectBefore = controller.project;
+
+      final detection = controller.detectSelectedImage(replaceExisting: true);
+      await Future<void>.delayed(Duration.zero);
+      await controller.cancelAutoBoxes();
+      await detection;
+
+      expect(runtime.cancelCount, 1);
+      expect(controller.project, same(projectBefore));
+      expect(controller.selectedBoxId, 'box-1');
+      expect(controller.isAutomationRunning, isFalse);
+      expect(controller.lastError, isNull);
+      expect(controller.lastUserMessage, WorkbenchCopy.autoBoxesCancelled);
+    },
+  );
 
   for (final mapping in <String, (Object, String)>{
     'file or NAS I/O failure': (
@@ -143,7 +239,7 @@ void main() {
       final statusBefore = controller.selectedImage!.status;
       final boxesBefore = controller.selectedImage!.boxes;
 
-      await controller.detectSelectedImage();
+      await controller.detectSelectedImage(replaceExisting: true);
 
       expect(controller.project, same(projectBefore));
       expect(controller.selectedBoxId, selectedBoxIdBefore);
@@ -158,7 +254,7 @@ void main() {
     });
   }
 
-  test('auto box keeps detector labels as unlabeled proposals', () async {
+  test('auto box preserves valid detector labels', () async {
     final runtime = FakeAutoBoxRuntime(
       detectionResult: const DetectionResult(
         detectorName: 'pre-labeled-detector',
@@ -186,15 +282,15 @@ void main() {
       ),
     );
     final controller = AppController(autoBoxRuntime: runtime)
-      ..loadProject(_project());
+      ..loadProject(_confirmedProject());
     addTearDown(controller.dispose);
 
-    await controller.detectSelectedImage();
+    await controller.detectSelectedImage(replaceExisting: true);
 
     final boxes = controller.selectedImage!.visibleBoxes.toList();
     expect(boxes, hasLength(2));
-    expect(boxes[0].status, BoxStatus.proposal);
-    expect(boxes[0].labelId, isNull);
+    expect(boxes[0].status, BoxStatus.labeled);
+    expect(boxes[0].labelId, 1);
     expect(boxes[1].status, BoxStatus.proposal);
     expect(boxes[1].labelId, isNull);
   });
@@ -228,7 +324,7 @@ void main() {
       ],
     );
 
-    final detection = controller.detectSelectedImage();
+    final detection = controller.detectSelectedImage(replaceExisting: true);
     await Future<void>.delayed(Duration.zero);
     controller.loadProject(replacement);
     completer.complete(_oneBoxResult('stale-box'));
@@ -256,7 +352,7 @@ void main() {
         ..loadProject(_twoImageProject());
       addTearDown(controller.dispose);
 
-      final detection = controller.detectSelectedImage();
+      final detection = controller.detectSelectedImage(replaceExisting: true);
       await Future<void>.delayed(Duration.zero);
       controller.selectImage(2);
       completer.complete(_oneBoxResult('stale-box'));
@@ -283,7 +379,7 @@ void main() {
       ..loadProject(_twoImageProject());
     addTearDown(controller.dispose);
 
-    final detection = controller.detectSelectedImage();
+    final detection = controller.detectSelectedImage(replaceExisting: true);
     await Future<void>.delayed(Duration.zero);
     controller.selectImage(2);
     completer.completeError(WorkerProtocolException('stale failure'));
@@ -311,7 +407,7 @@ void main() {
       final statusBefore = controller.selectedImage!.status;
       final boxesBefore = controller.selectedImage!.boxes;
 
-      await controller.detectSelectedImage();
+      await controller.detectSelectedImage(replaceExisting: true);
 
       expect(controller.project, same(projectBefore));
       expect(controller.selectedBoxId, selectedBoxIdBefore);
@@ -369,7 +465,7 @@ void main() {
       final statusBefore = controller.selectedImage!.status;
       final boxesBefore = controller.selectedImage!.boxes;
 
-      await controller.detectSelectedImage();
+      await controller.detectSelectedImage(replaceExisting: true);
 
       expect(controller.project, same(projectBefore));
       expect(controller.selectedBoxId, selectedBoxIdBefore);
@@ -386,7 +482,7 @@ void main() {
       expect(first.killCount, 1);
       expect(second.startCount, 0);
 
-      await controller.detectSelectedImage();
+      await controller.detectSelectedImage(replaceExisting: true);
 
       expect(factoryCount, 2);
       expect(second.startCount, 1);
@@ -432,7 +528,7 @@ void main() {
       final statusBefore = controller.selectedImage!.status;
       final boxesBefore = controller.selectedImage!.boxes;
 
-      await controller.detectSelectedImage();
+      await controller.detectSelectedImage(replaceExisting: true);
 
       expect(controller.project, same(projectBefore));
       expect(controller.selectedBoxId, selectedBoxIdBefore);
@@ -456,7 +552,7 @@ void main() {
     addTearDown(controller.dispose);
     controller.selectBox('box-1');
 
-    await controller.detectSelectedImage();
+    await controller.detectSelectedImage(replaceExisting: true);
 
     expect(controller.selectedImage!.visibleBoxes, isEmpty);
     expect(controller.selectedBoxId, isNull);
@@ -476,7 +572,7 @@ void main() {
         ..loadProject(_project());
       addTearDown(controller.dispose);
 
-      final detection = controller.detectSelectedImage();
+      final detection = controller.detectSelectedImage(replaceExisting: true);
       await Future<void>.delayed(Duration.zero);
       final replacement = _project();
       controller.debugSetProjectForTest(replacement);
@@ -505,11 +601,11 @@ void main() {
       ..loadProject(_project(name: 'first'));
     addTearDown(controller.dispose);
 
-    final first = controller.detectSelectedImage();
+    final first = controller.detectSelectedImage(replaceExisting: true);
     await Future<void>.delayed(Duration.zero);
     controller.loadProject(_project(name: 'second'));
     runtime.detectionCompleter = secondCompleter;
-    final second = controller.detectSelectedImage();
+    final second = controller.detectSelectedImage(replaceExisting: true);
     await Future<void>.delayed(Duration.zero);
 
     firstCompleter.complete(_oneBoxResult('stale-first-box'));
@@ -517,7 +613,7 @@ void main() {
     final runningAfterFirstCompleted = controller.isAutomationRunning;
     final activityAfterFirstCompleted = controller.lastUserMessage;
 
-    final third = controller.detectSelectedImage();
+    final third = controller.detectSelectedImage(replaceExisting: true);
     await Future<void>.delayed(Duration.zero);
     final detectCountAfterThirdAttempt = runtime.detectCount;
 

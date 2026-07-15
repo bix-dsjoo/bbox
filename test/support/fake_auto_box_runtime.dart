@@ -93,6 +93,10 @@ class FakeAutoBoxRuntime extends ChangeNotifier implements AutoBoxRuntime {
   @override
   Future<void> cancelActiveRequest() async {
     cancelCount++;
+    final completer = detectionCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.completeError(const AutoBoxCancelledException());
+    }
     setState(AutoBoxState.idle);
   }
 

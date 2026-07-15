@@ -218,6 +218,7 @@ void main() {
         controller.selectBox('box-1');
 
         await controller.detectSelectedImage(
+          replaceExisting: true,
           detector: _RecordingDetector(
             onDetect:
                 (image, {imagePath, options = const DetectionOptions()}) async {
@@ -263,6 +264,7 @@ void main() {
         controller.selectBox('box-1');
 
         await controller.detectSelectedImage(
+          replaceExisting: true,
           detector: _RecordingDetector(
             onDetect:
                 (image, {imagePath, options = const DetectionOptions()}) async {
@@ -306,6 +308,7 @@ void main() {
       final canUndoBefore = controller.canUndo;
 
       await controller.detectSelectedImage(
+        replaceExisting: true,
         detector: _RecordingDetector(
           onDetect:
               (image, {imagePath, options = const DetectionOptions()}) async {
@@ -334,6 +337,7 @@ void main() {
         controller.selectBox('box-1');
 
         await controller.detectSelectedImage(
+          replaceExisting: true,
           detector: _RecordingDetector(
             onDetect:
                 (image, {imagePath, options = const DetectionOptions()}) async {
@@ -361,6 +365,7 @@ void main() {
       final controller = AppController()..loadProject(_project());
 
       await controller.detectSelectedImage(
+        replaceExisting: true,
         detector: _RecordingDetector(
           onDetect:
               (image, {imagePath, options = const DetectionOptions()}) async {
@@ -383,6 +388,7 @@ void main() {
         final controller = AppController()..loadProject(_project());
 
         await controller.detectSelectedImage(
+          replaceExisting: true,
           detector: _RecordingDetector(
             onDetect:
                 (image, {imagePath, options = const DetectionOptions()}) async {

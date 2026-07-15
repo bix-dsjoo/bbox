@@ -124,7 +124,7 @@ class _CenterAutoBoxesToolbar extends StatelessWidget {
             FilledButton.icon(
               key: const ValueKey('auto-boxes-current-image'),
               onPressed: controller.canRunAutoBoxes
-                  ? () => controller.detectSelectedImage()
+                  ? () => unawaited(confirmAndRunAutoBoxes(context, controller))
                   : null,
               icon: const Icon(Icons.auto_awesome_outlined),
               label: Row(

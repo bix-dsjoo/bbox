@@ -35,6 +35,15 @@ class _WorkbenchActivityBar extends StatelessWidget {
               Expanded(
                 child: Text(text, maxLines: 1, overflow: TextOverflow.ellipsis),
               ),
+              if (controller.isAutomationRunning) ...[
+                const SizedBox(width: 12),
+                TextButton.icon(
+                  key: const ValueKey('cancel-auto-boxes'),
+                  onPressed: () => unawaited(controller.cancelAutoBoxes()),
+                  icon: const Icon(Icons.close, size: 18),
+                  label: const Text(WorkbenchCopy.cancelAutoBoxes),
+                ),
+              ],
               if (showProgress) ...[
                 const SizedBox(width: 12),
                 SizedBox(

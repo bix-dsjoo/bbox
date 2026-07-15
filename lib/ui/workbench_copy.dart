@@ -99,6 +99,14 @@ class WorkbenchCopy {
       '자동 박스 작업 프로세스를 복구하지 못했습니다. 기존 박스는 유지됩니다. 다시 시도하고 계속 실패하면 앱을 다시 시작하세요.';
   static const autoBoxesFailed =
       '자동 박스를 찾지 못했습니다. 기존 박스는 유지됩니다. 잠시 후 다시 시도하세요.';
+  static const autoBoxesReplacementConfirmationRequired =
+      '기존 박스를 교체하려면 먼저 확인해 주세요.';
+  static const autoBoxesReplaceTitle = '기존 박스를 교체할까요?';
+  static const autoBoxesReplaceMessage =
+      '현재 이미지의 기존 박스를 모두 지우고 자동 박스 결과로 교체합니다.';
+  static const autoBoxesReplaceConfirm = '교체하고 실행';
+  static const autoBoxesCancelled = '자동 박스 작업을 취소했습니다.';
+  static const cancelAutoBoxes = '자동 박스 취소';
   static const automationTools = '자동화';
   static const editTools = '편집';
   static const viewTools = '보기';

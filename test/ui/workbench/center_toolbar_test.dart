@@ -75,6 +75,8 @@ void main() {
         find.byKey(const ValueKey('auto-boxes-current-image')),
       );
       await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('confirm-auto-box-replace')));
+      await tester.pumpAndSettle();
 
       expect(runtime.detectCount, 1);
     });
@@ -306,6 +308,8 @@ void main() {
         find.byKey(const ValueKey('auto-boxes-current-image')),
       );
       await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('confirm-auto-box-replace')));
+      await tester.pumpAndSettle();
 
       expect(find.text(WorkbenchCopy.autoBoxesFileUnavailable), findsOneWidget);
       expect(find.textContaining('secret NAS detail'), findsNothing);
@@ -334,6 +338,8 @@ void main() {
       await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.keyB);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('confirm-auto-box-replace')));
       await tester.pumpAndSettle();
 
       expect(controller.selectedImage!.visibleBoxes, hasLength(1));
@@ -365,6 +371,39 @@ void main() {
       expect(controller.selectedImage!.visibleBoxes.single.id, 'box-1');
     });
 
+    testWidgets('enter accepts the selected red label suggestion', (
+      tester,
+    ) async {
+      final suggestedBox = project().images.first.boxes.single.copyWith(
+        automation: const BoxAutomationMetadata(
+          suggestedLabelId: 1,
+          reviewReasons: ['low_margin'],
+          pipelineVersion: 'test-v1',
+          policyVersion: 'test-policy-v1',
+          detectorSha256: 'detector-hash',
+        ),
+      );
+      final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
+        ..loadProject(
+          project().copyWith(
+            images: [
+              project().images.first.copyWith(boxes: [suggestedBox]),
+              project().images.last,
+            ],
+          ),
+        )
+        ..selectBox('box-1');
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(app(controller));
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+
+      expect(controller.selectedBox!.status, BoxStatus.labeled);
+      expect(controller.selectedBox!.labelId, 1);
+      expect(controller.selectedBox!.labelSource, LabelSource.user);
+    });
+
     testWidgets(
       'automation running locks editing while keeping view controls',
       (tester) async {
@@ -378,6 +417,9 @@ void main() {
         await tapVisible(
           tester,
           find.byKey(const ValueKey('auto-boxes-current-image')),
+        );
+        await tester.tap(
+          find.byKey(const ValueKey('confirm-auto-box-replace')),
         );
         await tester.pump();
 
@@ -454,6 +496,35 @@ void main() {
         await tester.pumpAndSettle();
       },
     );
+
+    testWidgets('automation cancel button preserves existing boxes', (
+      tester,
+    ) async {
+      final completer = Completer<DetectionResult>();
+      final runtime = FakeAutoBoxRuntime(detectionCompleter: completer);
+      final controller = AppController(autoBoxRuntime: runtime)
+        ..loadProject(project())
+        ..selectBox('box-1');
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(app(controller));
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('auto-boxes-current-image')),
+      );
+      await tester.tap(find.byKey(const ValueKey('confirm-auto-box-replace')));
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('cancel-auto-boxes')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('cancel-auto-boxes')));
+      await tester.pumpAndSettle();
+
+      expect(runtime.cancelCount, 1);
+      expect(controller.isAutomationRunning, isFalse);
+      expect(controller.selectedImage!.visibleBoxes.single.id, 'box-1');
+      expect(controller.selectedBoxId, 'box-1');
+      expect(controller.lastUserMessage, WorkbenchCopy.autoBoxesCancelled);
+    });
 
     testWidgets('automation toolbar exposes only auto boxes', (tester) async {
       final controller = AppController()..loadProject(project());

@@ -666,6 +666,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> detectSelectedImage({
+    bool replaceExisting = false,
     Detector? detector,
     DetectionOptions options = const DetectionOptions(),
   }) async {
@@ -675,6 +676,11 @@ class AppController extends ChangeNotifier {
         image == null ||
         image.status == ImageStatus.error ||
         isAutomationRunning) {
+      return;
+    }
+    if (image.visibleBoxes.isNotEmpty && !replaceExisting) {
+      lastUserMessage = WorkbenchCopy.autoBoxesReplacementConfirmationRequired;
+      notifyListeners();
       return;
     }
     final activeDetector = detector ?? _autoBoxRuntime;
@@ -711,10 +717,11 @@ class AppController extends ChangeNotifier {
       _undoStack.add(previousProject);
       _redoStack.clear();
       _project = previousProject;
-      final proposalBoxes = _asUnlabeledProposals(result.boxes);
+      final detectedBoxes = _normalizeDetectionLabelIds(project, result.boxes);
       final updated = previousImage.copyWith(
         status: ImageStatus.needsReview,
-        boxes: proposalBoxes,
+        boxes: detectedBoxes,
+        contentSha256: result.imageSha256,
         errorMessage: null,
       );
       _replaceSelectedImage(updated);
@@ -722,9 +729,9 @@ class AppController extends ChangeNotifier {
       _selectedBoxId = updated.visibleBoxes.isEmpty
           ? null
           : updated.visibleBoxes.first.id;
-      lastUserMessage = proposalBoxes.isEmpty
+      lastUserMessage = detectedBoxes.isEmpty
           ? WorkbenchCopy.autoBoxesEmpty
-          : WorkbenchCopy.autoBoxesCreated(proposalBoxes.length);
+          : WorkbenchCopy.autoBoxesCreated(detectedBoxes.length);
       _scheduleAutoSave();
     } catch (error) {
       if (!_isCurrentAutoBoxRequest(requestProjectEpoch, requestImageId)) {
@@ -733,14 +740,45 @@ class AppController extends ChangeNotifier {
       }
       _project = previousProject;
       _selectedBoxId = previousSelectedBoxId;
-      lastError = error;
-      lastUserMessage = _autoBoxErrorMessage(error);
+      if (error is AutoBoxCancelledException) {
+        lastError = null;
+        lastUserMessage = WorkbenchCopy.autoBoxesCancelled;
+      } else {
+        lastError = error;
+        lastUserMessage = _autoBoxErrorMessage(error);
+      }
     } finally {
       if (_activeAutoBoxRequestToken == requestToken) {
         _activeAutoBoxRequestToken = null;
         notifyListeners();
       }
     }
+  }
+
+  Future<void> cancelAutoBoxes() async {
+    if (!isAutomationRunning) {
+      return;
+    }
+    await _autoBoxRuntime.cancelActiveRequest();
+  }
+
+  void acceptSelectedSuggestedLabel() {
+    final image = selectedImage;
+    final boxId = selectedBoxId;
+    if (image == null ||
+        boxId == null ||
+        selectedBox?.requiresLabelReview != true) {
+      return;
+    }
+    _recordUndo();
+    _replaceSelectedImage(
+      AnnotationRules.acceptSuggestedLabel(
+        image,
+        boxId: boxId,
+      ).copyWith(status: ImageStatus.needsReview),
+    );
+    _scheduleAutoSave();
+    notifyListeners();
   }
 
   void clearSelectedImageBoxes() {
@@ -1110,10 +1148,27 @@ class AppController extends ChangeNotifier {
         (box.status != BoxStatus.labeled || box.labelId == null);
   }
 
-  List<BoundingBox> _asUnlabeledProposals(List<BoundingBox> boxes) {
+  List<BoundingBox> _normalizeDetectionLabelIds(
+    AnnotationProject project,
+    List<BoundingBox> boxes,
+  ) {
+    final validLabelIds = project.labels.map((label) => label.id).toSet();
     return [
       for (final box in boxes)
-        box.copyWith(status: BoxStatus.proposal, labelId: null),
+        if ((box.labelId == null || validLabelIds.contains(box.labelId)) &&
+            (box.automation?.suggestedLabelId == null ||
+                validLabelIds.contains(box.automation!.suggestedLabelId)))
+          box
+        else
+          box.copyWith(
+            status: BoxStatus.proposal,
+            labelId: null,
+            labelSource: null,
+            automation: box.automation?.copyWith(
+              suggestedLabelId: null,
+              reviewReasons: const ['label_registry_mismatch'],
+            ),
+          ),
     ];
   }
 

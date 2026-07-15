@@ -12,6 +12,7 @@ import '../../detector/auto_box_service.dart';
 import '../../viewer/viewport_transform.dart';
 import '../app_controller.dart';
 import '../app_theme.dart';
+import '../auto_box_replace_dialog.dart';
 import '../canvas_interaction.dart';
 import '../coco_export_destination_picker.dart';
 import '../coco_export_warning_dialog.dart';
@@ -280,8 +281,12 @@ class WorkbenchScreen extends StatelessWidget {
                 ): busyForProjectMutation
                     ? () {}
                     : _handleCompleteAndNextShortcut,
-                const SingleActivator(LogicalKeyboardKey.keyB, control: true):
-                    busyForProjectMutation ? () {} : _handleAutoBoxesShortcut,
+                const SingleActivator(
+                  LogicalKeyboardKey.keyB,
+                  control: true,
+                ): busyForProjectMutation
+                    ? () {}
+                    : () => _handleAutoBoxesShortcut(context),
               },
               child: Focus(
                 autofocus: true,
@@ -455,14 +460,14 @@ class WorkbenchScreen extends StatelessWidget {
     }
   }
 
-  void _handleAutoBoxesShortcut() {
+  void _handleAutoBoxesShortcut(BuildContext context) {
     if (!controller.canRunAutoBoxes) {
       return;
     }
     if (_textInputHasFocus()) {
       return;
     }
-    unawaited(controller.detectSelectedImage());
+    unawaited(confirmAndRunAutoBoxes(context, controller));
   }
 
   KeyEventResult _handleWorkbenchKey(
@@ -480,6 +485,11 @@ class WorkbenchScreen extends StatelessWidget {
     }
     if (_keyboardModifierPressed()) {
       return KeyEventResult.ignored;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.enter &&
+        controller.selectedBox?.requiresLabelReview == true) {
+      controller.acceptSelectedSuggestedLabel();
+      return KeyEventResult.handled;
     }
     final shortcut = _shortcutForKey(event.logicalKey);
     if (shortcut == null || controller.selectedBoxId == null) {
