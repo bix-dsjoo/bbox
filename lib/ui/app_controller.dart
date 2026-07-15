@@ -1937,18 +1937,10 @@ class AppController extends ChangeNotifier {
     final pipelineVersion =
         box.automation?.pipelineVersion ?? _pipelineVersionsByImageId[image.id];
     final editedBox = edit(image, box);
-    final shouldReclassify =
-        box.labelSource == LabelSource.auto ||
-        box.automation != null ||
-        (box.status == BoxStatus.proposal && box.labelId == null);
-    final updatedBox = shouldReclassify
-        ? editedBox.copyWith(
-            status: BoxStatus.proposal,
-            labelId: null,
-            labelSource: null,
-            automation: null,
-          )
-        : editedBox;
+    final hasAssignedLabel =
+        box.status == BoxStatus.labeled && box.labelId != null;
+    final shouldReclassify = !hasAssignedLabel;
+    final updatedBox = editedBox;
     _replaceSelectedImage(
       image.copyWith(
         status: ImageStatus.needsReview,
