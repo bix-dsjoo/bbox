@@ -523,6 +523,57 @@ void main() {
     expect(controller.selectedBox!.labelSource, LabelSource.user);
   });
 
+  test('labeling another box preserves pending classification', () async {
+    final runtime = FakeAutoBoxRuntime(
+      detectionResult: _acceptedClassificationResult(x: 11),
+    );
+    final controller = AppController(autoBoxRuntime: runtime)
+      ..loadProject(_twoUnlabeledAutomaticBoxProject())
+      ..selectBox('auto-box');
+    addTearDown(controller.dispose);
+
+    controller.moveSelectedBox(1, 0);
+    controller.selectBox('user-box');
+    controller.assignSelectedBoxLabel(2);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    final boxes = controller.selectedImage!.boxes;
+    final autoBox = boxes.firstWhere((box) => box.id == 'auto-box');
+    final userBox = boxes.firstWhere((box) => box.id == 'user-box');
+    expect(runtime.classifyCount, 1);
+    expect(autoBox.isAutoLabeled, isTrue);
+    expect(userBox.status, BoxStatus.labeled);
+    expect(userBox.labelId, 2);
+    expect(userBox.labelSource, LabelSource.user);
+  });
+
+  test('labeling another box preserves in-flight classification', () async {
+    final classification = Completer<DetectionResult>();
+    final runtime = FakeAutoBoxRuntime(
+      classifyHandler: (_, _) => classification.future,
+    );
+    final controller = AppController(autoBoxRuntime: runtime)
+      ..loadProject(_twoUnlabeledAutomaticBoxProject())
+      ..selectBox('auto-box');
+    addTearDown(controller.dispose);
+
+    controller.moveSelectedBox(1, 0);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(runtime.classifyCount, 1);
+    controller.selectBox('user-box');
+    controller.assignSelectedBoxLabel(2);
+    classification.complete(_acceptedClassificationResult(x: 11));
+    await Future<void>.delayed(Duration.zero);
+
+    final boxes = controller.selectedImage!.boxes;
+    final autoBox = boxes.firstWhere((box) => box.id == 'auto-box');
+    final userBox = boxes.firstWhere((box) => box.id == 'user-box');
+    expect(autoBox.isAutoLabeled, isTrue);
+    expect(userBox.status, BoxStatus.labeled);
+    expect(userBox.labelId, 2);
+    expect(userBox.labelSource, LabelSource.user);
+  });
+
   test('new manual box is classified after drawing completes', () async {
     final runtime = FakeAutoBoxRuntime();
     final controller = AppController(autoBoxRuntime: runtime)
@@ -1380,6 +1431,28 @@ AnnotationProject _unlabeledAutomaticProject() {
             status: BoxStatus.proposal,
             labelId: null,
             labelSource: null,
+          ),
+        ],
+      ),
+    ],
+  );
+}
+
+AnnotationProject _twoUnlabeledAutomaticBoxProject() {
+  final project = _unlabeledAutomaticProject();
+  final image = project.images.single;
+  return project.copyWith(
+    images: [
+      image.copyWith(
+        boxes: [
+          ...image.boxes,
+          const BoundingBox(
+            id: 'user-box',
+            x: 40,
+            y: 10,
+            width: 20,
+            height: 20,
+            status: BoxStatus.proposal,
           ),
         ],
       ),

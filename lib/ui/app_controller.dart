@@ -1450,9 +1450,6 @@ class AppController extends ChangeNotifier {
     if (image == null || boxId == null) {
       return;
     }
-    _classificationDebounce?.cancel();
-    _classificationGeneration++;
-    _classificationPending = false;
     _recordUndo();
     final updatedImage = AnnotationRules.assignLabel(
       image,
