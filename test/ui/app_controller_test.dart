@@ -753,10 +753,25 @@ void main() {
         final runtime = FakeAutoBoxRuntime(
           classifyHandler: (_, _) => classification.future,
         );
+        final project = _portableProject(
+          sourcePaths: [p.join(tempDir.path, 'old', 'bread.png')],
+        );
+        final sourceImage = project.images.single;
+        final box = sourceImage.boxes.single;
         final controller = AppController(autoBoxRuntime: runtime)
           ..loadProject(
-            _portableProject(
-              sourcePaths: [p.join(tempDir.path, 'old', 'bread.png')],
+            project.copyWith(
+              images: [
+                sourceImage.copyWith(
+                  boxes: [
+                    box.copyWith(
+                      status: BoxStatus.proposal,
+                      labelId: null,
+                      labelSource: null,
+                    ),
+                  ],
+                ),
+              ],
             ),
           )
           ..selectBox('box-1');
