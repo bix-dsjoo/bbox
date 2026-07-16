@@ -809,9 +809,9 @@ class BreadBoxWorkerPostprocessTest(unittest.TestCase):
 
 
 class BreadInferenceEngineTest(unittest.TestCase):
-    def test_classifier_receives_one_crop_batch_and_verifier_only_ambiguous_crop(self):
+    def test_classifier_confidence_states_skip_verifier(self):
         detector = PipelineDetector([(2, 3, 30, 32, 0.9), (40, 5, 75, 45, 0.8)])
-        classifier = BatchClassifier([(0.95, 0.03, 0.02), (0.55, 0.4, 0.05)])
+        classifier = BatchClassifier([(0.98, 0.01, 0.01), (0.75, 0.2, 0.05)])
         verifier = RecordingVerifier()
         engine = pipeline_engine(detector, classifier, verifier)
 
@@ -821,10 +821,10 @@ class BreadInferenceEngineTest(unittest.TestCase):
         crops, kwargs = classifier.calls[0]
         self.assertEqual(len(crops), 2)
         self.assertEqual(kwargs["batch"], 2)
-        self.assertEqual(len(verifier.crops), 1)
+        self.assertEqual(len(verifier.crops), 0)
         self.assertEqual(
             [item["label"]["state"] for item in result["boxes"]],
-            ["accepted", "accepted"],
+            ["accepted", "review"],
         )
 
     def test_none_verifier_manifest_skips_verifier_construction(self):
@@ -859,18 +859,18 @@ class BreadInferenceEngineTest(unittest.TestCase):
         self.assertIsNone(engine.verifier)
         self.assertEqual(result["boxes"][1]["label"]["state"], "review")
 
-    def test_crop_only_verifier_receives_only_ambiguous_crop(self):
+    def test_crop_only_verifier_is_skipped_for_confidence_states(self):
         verifier = CropOnlyVerifier()
         engine = pipeline_engine(
             PipelineDetector([(2, 3, 30, 32, 0.9), (40, 5, 75, 45, 0.8)]),
-            BatchClassifier([(0.95, 0.03, 0.02), (0.55, 0.4, 0.05)]),
+            BatchClassifier([(0.98, 0.01, 0.01), (0.75, 0.2, 0.05)]),
             verifier,
         )
 
         result = engine.detect_bytes(pipeline_png_bytes())
 
-        self.assertEqual(len(verifier.crops), 1)
-        self.assertEqual(result["boxes"][1]["label"]["state"], "accepted")
+        self.assertEqual(len(verifier.crops), 0)
+        self.assertEqual(result["boxes"][1]["label"]["state"], "review")
 
     def test_classifier_batch_is_capped_at_sixteen(self):
         rows = [(index * 2, 5, index * 2 + 1, 10, 0.9) for index in range(17)]
@@ -953,15 +953,17 @@ class BreadInferenceEngineTest(unittest.TestCase):
         self.assertEqual(result["boxes"][0]["x"], 2)
         self.assertEqual(engine.detector.calls, [])
 
-    def test_finite_boundary_overrun_is_clamped_and_marked_for_review(self):
+    def test_finite_boundary_overrun_keeps_accepted_state_with_edge_diagnostic(self):
         engine = pipeline_engine(
             PipelineDetector([(-0.2, 2, 20, 20, 0.9)]),
-            BatchClassifier([(0.95, 0.03, 0.02)]),
+            BatchClassifier([(0.98, 0.01, 0.01)]),
         )
 
         result = engine.detect_bytes(pipeline_png_bytes())
 
         self.assertEqual(result["boxes"][0]["x"], 0)
+        self.assertEqual(result["boxes"][0]["label"]["state"], "accepted")
+        self.assertEqual(result["boxes"][0]["label"]["labelId"], 1)
         self.assertIn("edge_clipped", result["boxes"][0]["label"]["reviewReasons"])
 
     def test_nonfinite_and_nonpositive_boxes_are_discarded(self):
@@ -1165,13 +1167,19 @@ class BreadInferenceEngineTest(unittest.TestCase):
     def test_duplicate_reason_is_applied_to_survivors_after_nms(self):
         engine = pipeline_engine(
             PipelineDetector([(5, 5, 35, 35, 0.9), (10, 10, 40, 40, 0.8)]),
-            BatchClassifier([(0.95, 0.03, 0.02), (0.95, 0.03, 0.02)]),
+            BatchClassifier([(0.98, 0.01, 0.01), (0.98, 0.01, 0.01)]),
             manifest=pipeline_manifest(duplicate_iou=0.5),
         )
 
         result = engine.detect_bytes(pipeline_png_bytes())
 
         self.assertEqual(len(result["boxes"]), 2)
+        self.assertTrue(
+            all(item["label"]["state"] == "accepted" for item in result["boxes"])
+        )
+        self.assertTrue(
+            all(item["label"]["labelId"] == 1 for item in result["boxes"])
+        )
         self.assertTrue(
             all(
                 "possible_duplicate" in item["label"]["reviewReasons"]

@@ -752,10 +752,6 @@ def _add_review_reason(label, reason):
     reasons = list(result.get("reviewReasons", []))
     if reason not in reasons:
         reasons.append(reason)
-    if result.get("state") == "accepted":
-        result["state"] = "review"
-        result["suggestedLabelId"] = result.get("labelId")
-        result["labelId"] = None
     result["reviewReasons"] = reasons
     return result
 

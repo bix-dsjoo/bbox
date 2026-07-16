@@ -431,11 +431,27 @@ void main() {
       expect(selectedIndex, greaterThan(unselectedIndex));
     });
 
-    testWidgets('selected automatic box keeps high contrast gray styling', (
+    testWidgets('unavailable proposal keeps high contrast gray styling', (
       tester,
     ) async {
+      final unavailableBox = project().images.first.boxes.single.copyWith(
+        automation: const BoxAutomationMetadata(
+          candidates: [LabelCandidate(labelId: 1, score: 0.50)],
+          reviewReasons: ['classifier_unavailable'],
+          pipelineVersion: 'test-v1',
+          policyVersion: 'test-policy-v1',
+          detectorSha256: 'detector-hash',
+        ),
+      );
       final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
-        ..loadProject(project());
+        ..loadProject(
+          project().copyWith(
+            images: [
+              project().images.first.copyWith(boxes: [unavailableBox]),
+              project().images.last,
+            ],
+          ),
+        );
       controller.selectBox('box-1');
 
       await tester.pumpWidget(app(controller));
@@ -477,7 +493,7 @@ void main() {
     });
 
     testWidgets(
-      'labeled box uses white outline and category-colored name badge',
+      'accepted automatic box uses white outline and category-colored name badge',
       (tester) async {
         final controller = AppController(autoBoxRuntime: FakeAutoBoxRuntime())
           ..loadProject(
@@ -493,6 +509,13 @@ void main() {
                       height: 20,
                       status: BoxStatus.labeled,
                       labelId: 1,
+                      labelSource: LabelSource.auto,
+                      automation: BoxAutomationMetadata(
+                        candidates: [LabelCandidate(labelId: 1, score: 0.98)],
+                        pipelineVersion: 'test-v1',
+                        policyVersion: 'test-policy-v1',
+                        detectorSha256: 'detector-hash',
+                      ),
                     ),
                   ],
                 ),
@@ -580,7 +603,7 @@ void main() {
       final reviewBox = project().images.first.boxes.single.copyWith(
         automation: const BoxAutomationMetadata(
           suggestedLabelId: 1,
-          candidates: [LabelCandidate(labelId: 1, score: 0.58)],
+          candidates: [LabelCandidate(labelId: 1, score: 0.75)],
           reviewReasons: ['low_margin'],
           pipelineVersion: 'test-v1',
           policyVersion: 'test-policy-v1',

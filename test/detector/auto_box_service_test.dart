@@ -640,6 +640,7 @@ void main() {
       expect(box.labelId, 3);
       expect(box.labelSource, LabelSource.auto);
       expect(box.automation?.candidates.single.labelId, 3);
+      expect(box.automation?.candidates.single.score, 0.98);
     });
 
     test('review worker label maps to suggestion-only proposal', () async {
@@ -655,6 +656,25 @@ void main() {
       expect(box.labelId, isNull);
       expect(box.automation?.suggestedLabelId, 3);
       expect(box.requiresLabelReview, isTrue);
+      expect(box.automation?.candidates.first.score, 0.75);
+    });
+
+    test('unavailable worker label maps to suggestion-free proposal', () async {
+      final client = FakeBreadWorkerClient(
+        responses: [unavailableWorkerResponse],
+      );
+      final service = AutoBoxService(
+        createClient: () => client,
+        openImage: (_) async => testPayload(),
+      );
+
+      final box = (await service.detect(testImage)).boxes.single;
+
+      expect(box.status, BoxStatus.proposal);
+      expect(box.labelId, isNull);
+      expect(box.automation?.suggestedLabelId, isNull);
+      expect(box.requiresLabelReview, isFalse);
+      expect(box.automation?.candidates.first.score, 0.50);
     });
 
     test(
@@ -1010,10 +1030,47 @@ const reviewWorkerResponse = <String, Object?>{
         'labelId': null,
         'suggestedLabelId': 3,
         'candidates': <Object?>[
-          <String, Object?>{'labelId': 3, 'score': 0.72},
+          <String, Object?>{'labelId': 3, 'score': 0.75},
           <String, Object?>{'labelId': 5, 'score': 0.24},
         ],
         'reviewReasons': <Object?>['classifier_ambiguous'],
+        'embeddingUsed': false,
+      },
+    },
+  ],
+  'stageErrors': <Object?>[],
+};
+
+const unavailableWorkerResponse = <String, Object?>{
+  'pipelineVersion': 'bread-pipeline-v1',
+  'policyVersion': 'bread-label-policy-v2',
+  'detectorName': 'bread-yolo-boxes',
+  'modelHashes': <String, Object?>{
+    'detector': 'detector-hash',
+    'classifier': 'classifier-hash',
+    'verifier': null,
+  },
+  'image': <String, Object?>{
+    'width': 100,
+    'height': 80,
+    'sha256': 'image-hash',
+  },
+  'boxes': <Object?>[
+    <String, Object?>{
+      'id': 'worker-1',
+      'x': 10,
+      'y': 5,
+      'width': 20,
+      'height': 30,
+      'confidence': 0.91,
+      'label': <String, Object?>{
+        'state': 'unavailable',
+        'labelId': null,
+        'suggestedLabelId': null,
+        'candidates': <Object?>[
+          <String, Object?>{'labelId': 3, 'score': 0.50},
+        ],
+        'reviewReasons': <Object?>['classifier_unavailable'],
         'embeddingUsed': false,
       },
     },
