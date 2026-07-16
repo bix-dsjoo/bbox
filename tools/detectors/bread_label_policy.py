@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from typing import Any
 
 
+UNLABELED_CONFIDENCE_MAX = 0.50
+AUTO_LABEL_CONFIDENCE_MIN = 0.98
+
+
 @dataclass(frozen=True)
 class LabelCandidate:
     label_id: int
@@ -367,37 +371,34 @@ def classify_policy(
 ) -> LabelDecision:
     candidates = _policy_candidates(classifier_scores, manifest)
     top_candidates = candidates[:3]
-    top_label_id = candidates[0].label_id
-    reasons = list(
-        quality_reasons(det_box, image_size, _manifest_section(manifest, "quality"))
+    _is_ambiguous(candidates, manifest)
+    diagnostics = quality_reasons(
+        det_box, image_size, _manifest_section(manifest, "quality")
     )
-    ambiguous = _is_ambiguous(candidates, manifest)
-    if ambiguous:
-        reasons.append("classifier_ambiguous")
-
-    embedding_used = False
-    verifier_specification = _manifest_section(manifest, "verifier")
-    verifier_enabled = (
-        isinstance(verifier_specification, Mapping)
-        and verifier_specification.get("kind") != "none"
-    )
-    if ambiguous and verifier is not None and verifier_enabled:
-        try:
-            result = _verifier_result(
-                _call_verifier(verifier, top_label_id, top_candidates)
-            )
-            embedding_used = True
-            if _verifier_passes(result, top_label_id, manifest):
-                reasons.remove("classifier_ambiguous")
-        except Exception:
-            reasons.append("verifier_failed")
-
-    accepted = not reasons
+    top = candidates[0]
+    if top.score <= UNLABELED_CONFIDENCE_MAX:
+        return LabelDecision(
+            state="unavailable",
+            label_id=None,
+            suggested_label_id=None,
+            candidates=top_candidates,
+            review_reasons=("classifier_low_confidence",),
+            embedding_used=False,
+        )
+    if top.score < AUTO_LABEL_CONFIDENCE_MIN:
+        return LabelDecision(
+            state="review",
+            label_id=None,
+            suggested_label_id=top.label_id,
+            candidates=top_candidates,
+            review_reasons=("classifier_confidence_review",),
+            embedding_used=False,
+        )
     return LabelDecision(
-        state="accepted" if accepted else "review",
-        label_id=top_label_id if accepted else None,
-        suggested_label_id=None if accepted else top_label_id,
+        state="accepted",
+        label_id=top.label_id,
+        suggested_label_id=None,
         candidates=top_candidates,
-        review_reasons=tuple(reasons),
-        embedding_used=embedding_used,
+        review_reasons=diagnostics,
+        embedding_used=False,
     )

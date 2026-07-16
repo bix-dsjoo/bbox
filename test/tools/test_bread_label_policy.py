@@ -98,6 +98,38 @@ class Verifier:
 
 
 class BreadLabelPolicyTest(unittest.TestCase):
+    def test_classifier_confidence_maps_to_exact_ui_states(self) -> None:
+        cases = (
+            (0.50, "unavailable", None, None),
+            (0.5001, "review", None, 3),
+            (0.9799, "review", None, 3),
+            (0.98, "accepted", 3, None),
+        )
+        for confidence, state, label_id, suggested_id in cases:
+            with self.subTest(confidence=confidence):
+                decision = classify_policy(
+                    scores(top1=3, confidence=confidence, margin=0.40),
+                    normal_box(),
+                    (1920, 1080),
+                    manifest(accept_confidence=0.98),
+                )
+                self.assertEqual(decision.state, state)
+                self.assertEqual(decision.label_id, label_id)
+                self.assertEqual(decision.suggested_label_id, suggested_id)
+
+    def test_high_confidence_quality_warning_remains_accepted(self) -> None:
+        decision = classify_policy(
+            scores(top1=3, confidence=0.98, margin=0.40),
+            Box(2.0, 100.0, 200.0, 100.0),
+            (1920, 1080),
+            manifest(accept_confidence=0.98),
+        )
+
+        self.assertEqual(decision.state, "accepted")
+        self.assertEqual(decision.label_id, 3)
+        self.assertIsNone(decision.suggested_label_id)
+        self.assertEqual(decision.review_reasons, ("edge_clipped",))
+
     def test_normalized_scores_are_immutable_and_candidates_are_deterministic_top_three(self) -> None:
         ordered = normalized_scores(
             {5: 0.1, 2: 0.3, 4: 0.3, 1: 0.2, 3: 0.1}, manifest().labels
@@ -155,7 +187,7 @@ class BreadLabelPolicyTest(unittest.TestCase):
 
     def test_confident_prediction_is_accepted_with_exact_json_contract(self) -> None:
         decision = classify_policy(
-            scores(top1=3, confidence=0.95, margin=0.40),
+            scores(top1=3, confidence=0.98, margin=0.40),
             normal_box(),
             (1920, 1080),
             manifest(),
@@ -173,8 +205,8 @@ class BreadLabelPolicyTest(unittest.TestCase):
                 "labelId": 3,
                 "suggestedLabelId": None,
                 "candidates": [
-                    {"labelId": 3, "score": 0.95},
-                    {"labelId": 1, "score": 0.55},
+                    {"labelId": 3, "score": 0.98},
+                    {"labelId": 1, "score": 0.58},
                     {"labelId": 2, "score": 0.0},
                 ],
                 "reviewReasons": [],
@@ -182,19 +214,6 @@ class BreadLabelPolicyTest(unittest.TestCase):
             },
         )
         json.dumps(decision.to_json(), allow_nan=False)
-
-    def test_quality_warning_forces_review_even_when_confident(self) -> None:
-        decision = classify_policy(
-            scores(top1=3, confidence=0.95, margin=0.40),
-            Box(2.0, 100.0, 200.0, 100.0),
-            (1920, 1080),
-            manifest(),
-        )
-
-        self.assertEqual(decision.state, "review")
-        self.assertIsNone(decision.label_id)
-        self.assertEqual(decision.suggested_label_id, 3)
-        self.assertIn("edge_clipped", decision.review_reasons)
 
     def test_quality_reasons_have_stable_order(self) -> None:
         self.assertEqual(
@@ -216,99 +235,34 @@ class BreadLabelPolicyTest(unittest.TestCase):
         for classifier_scores, policy_manifest, name in cases:
             with self.subTest(name=name):
                 self.assertTrue(is_ambiguous_scores(classifier_scores, policy_manifest))
-                decision = classify_policy(
-                    classifier_scores, normal_box(), (1920, 1080), policy_manifest
-                )
-                self.assertEqual(decision.state, "review")
-                self.assertEqual(decision.review_reasons, ("classifier_ambiguous",))
-                self.assertIsNone(decision.label_id)
-                self.assertEqual(decision.suggested_label_id, 3)
 
-    def test_passing_verifier_agreement_clears_only_classifier_ambiguity(self) -> None:
-        verifier = Verifier({"labelId": 3, "score": 0.90, "margin": 0.20})
-
-        decision = classify_policy(
-            scores(top1=3, confidence=0.70, margin=0.02),
-            normal_box(),
-            (1920, 1080),
-            manifest(verifier_kind="torchscript"),
-            verifier=verifier,
-        )
-
-        self.assertEqual(decision.state, "accepted")
-        self.assertEqual(decision.label_id, 3)
-        self.assertEqual(decision.review_reasons, ())
-        self.assertTrue(decision.embedding_used)
-        self.assertEqual(len(verifier.calls), 1)
-
-    def test_verifier_cannot_clear_quality_reasons(self) -> None:
-        verifier = Verifier({"labelId": 3, "score": 0.90, "margin": 0.20})
-
-        decision = classify_policy(
-            scores(top1=3, confidence=0.70, margin=0.02),
-            Box(2.0, 100.0, 200.0, 100.0),
-            (1920, 1080),
-            manifest(verifier_kind="torchscript"),
-            verifier=verifier,
-        )
-
-        self.assertEqual(decision.state, "review")
-        self.assertEqual(decision.review_reasons, ("edge_clipped",))
-        self.assertTrue(decision.embedding_used)
-
-    def test_verifier_disagreement_or_threshold_failure_stays_review(self) -> None:
+    def test_legacy_ambiguity_and_verifier_do_not_override_top_score(self) -> None:
+        verifier = Verifier(error=RuntimeError("must not be invoked"))
         cases = (
-            {"labelId": 4, "score": 0.90, "margin": 0.20},
-            {"labelId": 3, "score": 0.79, "margin": 0.20},
-            {"labelId": 3, "score": 0.90, "margin": 0.09},
+            (manifest(accept_margin=0.20), "margin"),
+            (manifest(conservative_classes=[3]), "class"),
         )
 
-        for result in cases:
-            with self.subTest(result=result):
+        for policy_manifest, name in cases:
+            with self.subTest(name=name):
+                classifier_scores = scores(
+                    top1=3, confidence=0.98, margin=0.01
+                )
+                self.assertTrue(
+                    is_ambiguous_scores(classifier_scores, policy_manifest)
+                )
                 decision = classify_policy(
-                    scores(top1=3, confidence=0.70, margin=0.02),
+                    classifier_scores,
                     normal_box(),
                     (1920, 1080),
-                    manifest(verifier_kind="torchscript"),
-                    verifier=Verifier(result),
+                    policy_manifest,
+                    verifier=verifier,
                 )
-                self.assertEqual(decision.state, "review")
-                self.assertEqual(decision.review_reasons, ("classifier_ambiguous",))
-                self.assertTrue(decision.embedding_used)
+                self.assertEqual(decision.state, "accepted")
+                self.assertEqual(decision.label_id, 3)
+                self.assertFalse(decision.embedding_used)
 
-    def test_ambiguous_verifier_failure_stays_review(self) -> None:
-        decision = classify_policy(
-            scores(top1=3, confidence=0.70, margin=0.02),
-            normal_box(),
-            (1920, 1080),
-            manifest(verifier_kind="torchscript"),
-            verifier=Verifier(error=RuntimeError("broken verifier")),
-        )
-
-        self.assertEqual(decision.state, "review")
-        self.assertEqual(
-            decision.review_reasons, ("classifier_ambiguous", "verifier_failed")
-        )
-        self.assertFalse(decision.embedding_used)
-
-    def test_none_or_unneeded_verifier_is_not_invoked(self) -> None:
-        verifier = Verifier({"labelId": 3, "score": 1.0, "margin": 1.0})
-
-        confident = classify_policy(
-            scores(), normal_box(), (1920, 1080), manifest(), verifier=verifier
-        )
-        ambiguous_without_verifier = classify_policy(
-            scores(confidence=0.70, margin=0.02),
-            normal_box(),
-            (1920, 1080),
-            manifest(),
-            verifier=None,
-        )
-
-        self.assertEqual(confident.state, "accepted")
-        self.assertEqual(ambiguous_without_verifier.state, "review")
         self.assertEqual(verifier.calls, [])
-        self.assertFalse(ambiguous_without_verifier.embedding_used)
 
     def test_rejects_invalid_scores_boxes_and_image_sizes(self) -> None:
         cases = (
@@ -392,7 +346,7 @@ class BreadLabelPolicyTest(unittest.TestCase):
                         scores(), normal_box(), (1920, 1080), policy_manifest
                     )
 
-    def test_invalid_verifier_threshold_fails_closed_as_review(self) -> None:
+    def test_invalid_verifier_threshold_does_not_override_confidence_state(self) -> None:
         for field, value in (("scoreThreshold", True), ("marginThreshold", math.nan)):
             policy_manifest = manifest(verifier_kind="torchscript")
             policy_manifest.verifier[field] = value
@@ -408,9 +362,9 @@ class BreadLabelPolicyTest(unittest.TestCase):
             with self.subTest(field=field, value=value):
                 self.assertEqual(decision.state, "review")
                 self.assertEqual(
-                    decision.review_reasons,
-                    ("classifier_ambiguous", "verifier_failed"),
+                    decision.review_reasons, ("classifier_confidence_review",)
                 )
+                self.assertFalse(decision.embedding_used)
 
 
 if __name__ == "__main__":

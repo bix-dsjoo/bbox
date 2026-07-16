@@ -13,7 +13,7 @@
     "file": "bread_classifier_yolov8n_cls_v1_ec95587bca5c4a2873a12faf180a78bdf59ced648dafca37bba5086d5697fa02.pt",
     "sha256": "ec95587bca5c4a2873a12faf180a78bdf59ced648dafca37bba5086d5697fa02",
     "imgsz": 224,
-    "acceptConfidence": 0.0,
+    "acceptConfidence": 0.98,
     "acceptMargin": 0.5045855343341827,
     "conservativeClasses": [
       9,
