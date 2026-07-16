@@ -1372,6 +1372,8 @@ class AppController extends ChangeNotifier {
         currentImage == null ||
         currentImage.sourcePath != sourcePath ||
         currentBox == null ||
+        currentBox.status != BoxStatus.proposal ||
+        currentBox.labelId != null ||
         !_sameGeometry(currentBox, x, y, width, height)) {
       return;
     }
@@ -1448,6 +1450,9 @@ class AppController extends ChangeNotifier {
     if (image == null || boxId == null) {
       return;
     }
+    _classificationDebounce?.cancel();
+    _classificationGeneration++;
+    _classificationPending = false;
     _recordUndo();
     final updatedImage = AnnotationRules.assignLabel(
       image,

@@ -499,6 +499,30 @@ void main() {
     },
   );
 
+  test('user label assigned before cached debounce is preserved', () async {
+    final runtime = FakeAutoBoxRuntime(
+      detectionResult: _reviewClassificationResult(x: 11),
+    );
+    final controller = AppController(autoBoxRuntime: runtime)
+      ..loadProject(_unlabeledAutomaticProject())
+      ..selectBox('auto-box');
+    addTearDown(controller.dispose);
+
+    controller.moveSelectedBox(1, 0);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(runtime.classifyCount, 1);
+
+    controller.moveSelectedBox(1, 0);
+    controller.moveSelectedBox(-1, 0);
+    controller.assignSelectedBoxLabel(2);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(runtime.classifyCount, 1);
+    expect(controller.selectedBox!.status, BoxStatus.labeled);
+    expect(controller.selectedBox!.labelId, 2);
+    expect(controller.selectedBox!.labelSource, LabelSource.user);
+  });
+
   test('new manual box is classified after drawing completes', () async {
     final runtime = FakeAutoBoxRuntime();
     final controller = AppController(autoBoxRuntime: runtime)
